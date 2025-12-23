@@ -8,14 +8,22 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
-import type { ChatMessage } from "@/lib/types"
+import { BranchChip } from "./branch-chip"
+import type { ChatMessage, BranchThread } from "@/lib/types"
 
 interface ChatMessageProps {
   message: ChatMessage
   onBranch?: (localId: string, responseId: string) => void
+  branches?: BranchThread[]
+  onOpenBranch?: (branchId: string) => void
 }
 
-export function ChatMessageBubble({ message, onBranch }: ChatMessageProps) {
+export function ChatMessageBubble({
+  message,
+  onBranch,
+  branches = [],
+  onOpenBranch,
+}: ChatMessageProps) {
   const isUser = message.role === "user"
   const isAssistant = message.role === "assistant"
 
@@ -25,46 +33,61 @@ export function ChatMessageBubble({ message, onBranch }: ChatMessageProps) {
     }
   }
 
+  const handleOpenBranch = (branchId: string) => {
+    if (onOpenBranch) {
+      onOpenBranch(branchId)
+    }
+  }
+
   return (
     <div
       className={cn(
-        "group flex w-full animate-message-in",
-        isUser ? "justify-end" : "justify-start"
+        "group flex flex-col w-full animate-message-in",
+        isUser ? "items-end" : "items-start"
       )}
     >
-      <div
-        className={cn(
-          "relative max-w-[80%] rounded-2xl px-4 py-2.5",
-          isUser
-            ? "bg-primary text-primary-foreground rounded-br-md"
-            : "bg-muted text-foreground rounded-bl-md"
-        )}
-      >
-        <p className="text-sm whitespace-pre-wrap break-words leading-relaxed">
-          {message.text}
-        </p>
+      <div className="flex w-full" style={{ justifyContent: isUser ? "flex-end" : "flex-start" }}>
+        <div
+          className={cn(
+            "relative max-w-[80%] rounded-2xl px-4 py-2.5",
+            isUser
+              ? "bg-primary text-primary-foreground rounded-br-md"
+              : "bg-muted text-foreground rounded-bl-md"
+          )}
+        >
+          <p className="text-sm whitespace-pre-wrap break-words leading-relaxed">
+            {message.text}
+          </p>
 
-        {/* Branch button for assistant messages */}
-        {isAssistant && message.responseId && (
-          <div className="absolute -right-1 top-1/2 -translate-y-1/2 translate-x-full opacity-0 group-hover:opacity-100 transition-opacity">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7 text-muted-foreground hover:text-foreground"
-                  onClick={handleBranch}
-                >
-                  <GitBranch className="h-3.5 w-3.5" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="right">
-                <p>Branch from here</p>
-              </TooltipContent>
-            </Tooltip>
-          </div>
-        )}
+          {/* Branch button for assistant messages */}
+          {isAssistant && message.responseId && (
+            <div className="absolute -right-1 top-1/2 -translate-y-1/2 translate-x-full opacity-0 group-hover:opacity-100 transition-opacity">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                    onClick={handleBranch}
+                  >
+                    <GitBranch className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="right">
+                  <p>Branch from here</p>
+                </TooltipContent>
+              </Tooltip>
+            </div>
+          )}
+        </div>
       </div>
+
+      {/* Branch chips below assistant messages */}
+      {isAssistant && branches.length > 0 && (
+        <div className="mt-1.5 ml-1">
+          <BranchChip branches={branches} onOpenBranch={handleOpenBranch} />
+        </div>
+      )}
     </div>
   )
 }

@@ -1,12 +1,22 @@
 "use client"
 
-import { useState, useRef, useEffect, useCallback } from "react"
+import { useState, useRef, useEffect, useCallback, useMemo } from "react"
 import { RotateCcw, MessageSquare } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { TooltipProvider } from "@/components/ui/tooltip"
-import { ChatMessageBubble, TypingIndicator, Composer } from "@/components/chat"
-import type { ChatMessage, MainThreadState, RespondResponse } from "@/lib/types"
+import {
+  ChatMessageBubble,
+  TypingIndicator,
+  Composer,
+  BranchOverlay,
+} from "@/components/chat"
+import type {
+  ChatMessage,
+  MainThreadState,
+  RespondResponse,
+  BranchThread,
+} from "@/lib/types"
 
 function generateId(): string {
   return crypto.randomUUID()
@@ -21,6 +31,12 @@ export default function BranchesDemo() {
   const [inputValue, setInputValue] = useState("")
   const [isLoading, setIsLoading] = useState(false)
 
+  // Branch state management
+  const [branchesByParentLocalId, setBranchesByParentLocalId] = useState<
+    Record<string, BranchThread[]>
+  >({})
+  const [activeBranchId, setActiveBranchId] = useState<string | null>(null)
+
   // Refs for autoscroll behavior
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
@@ -33,7 +49,6 @@ export default function BranchesDemo() {
 
     const { scrollTop, scrollHeight, clientHeight } = container
     const distanceFromBottom = scrollHeight - scrollTop - clientHeight
-    // Consider "at bottom" if within 100px
     shouldAutoScroll.current = distanceFromBottom < 100
   }, [])
 
@@ -44,12 +59,30 @@ export default function BranchesDemo() {
     }
   }, [state.messages, isLoading])
 
-  // Handle sending a message
+  // Get the active branch object
+  const activeBranch = useMemo(() => {
+    if (!activeBranchId) return null
+    for (const branches of Object.values(branchesByParentLocalId)) {
+      const branch = branches.find((b) => b.id === activeBranchId)
+      if (branch) return branch
+    }
+    return null
+  }, [activeBranchId, branchesByParentLocalId])
+
+  // Get parent message text for the active branch
+  const parentMessageText = useMemo(() => {
+    if (!activeBranch) return ""
+    const parentMessage = state.messages.find(
+      (m) => m.localId === activeBranch.parentAssistantLocalId
+    )
+    return parentMessage?.text || ""
+  }, [activeBranch, state.messages])
+
+  // Handle sending a message in main thread
   const handleSend = async () => {
     const userText = inputValue.trim()
     if (!userText || isLoading) return
 
-    // Create user message
     const userMessage: ChatMessage = {
       localId: generateId(),
       role: "user",
@@ -57,7 +90,6 @@ export default function BranchesDemo() {
       createdAt: Date.now(),
     }
 
-    // Immediately append user message and clear input
     setState((prev) => ({
       ...prev,
       messages: [...prev.messages, userMessage],
@@ -85,7 +117,6 @@ export default function BranchesDemo() {
 
       const responseData = data as RespondResponse
 
-      // Create assistant message with responseId
       const assistantMessage: ChatMessage = {
         localId: generateId(),
         role: "assistant",
@@ -94,7 +125,6 @@ export default function BranchesDemo() {
         responseId: responseData.id,
       }
 
-      // Append assistant message and update lastResponseId
       setState((prev) => ({
         messages: [...prev.messages, assistantMessage],
         lastResponseId: responseData.id,
@@ -108,11 +138,59 @@ export default function BranchesDemo() {
     }
   }
 
-  // Handle branch button click (stub for PR #3)
+  // Handle creating a new branch from an assistant message
   const handleBranch = (localId: string, responseId: string) => {
-    console.log("Branch requested:", { localId, responseId })
-    toast.info("Branching will be available in the next update!", {
-      description: `Response ID: ${responseId.slice(0, 20)}...`,
+    // Count existing branches for this parent
+    const existingBranches = branchesByParentLocalId[localId] || []
+    const branchNumber = existingBranches.length + 1
+
+    // Create new branch
+    const newBranch: BranchThread = {
+      id: generateId(),
+      parentAssistantLocalId: localId,
+      parentAssistantResponseId: responseId,
+      title: `Branch ${branchNumber}`,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      mode: "fast", // Default to fast mode
+      includeInMain: false, // Default OFF
+      includeMode: "summary",
+      messages: [],
+      lastResponseId: null,
+    }
+
+    // Add to branches map
+    setBranchesByParentLocalId((prev) => ({
+      ...prev,
+      [localId]: [...(prev[localId] || []), newBranch],
+    }))
+
+    // Open the new branch
+    setActiveBranchId(newBranch.id)
+  }
+
+  // Handle opening an existing branch
+  const handleOpenBranch = (branchId: string) => {
+    setActiveBranchId(branchId)
+  }
+
+  // Handle closing the branch overlay
+  const handleCloseBranch = () => {
+    setActiveBranchId(null)
+  }
+
+  // Handle updating a branch (from overlay)
+  const handleUpdateBranch = (updatedBranch: BranchThread) => {
+    setBranchesByParentLocalId((prev) => {
+      const parentId = updatedBranch.parentAssistantLocalId
+      const branches = prev[parentId] || []
+      const updatedBranches = branches.map((b) =>
+        b.id === updatedBranch.id ? updatedBranch : b
+      )
+      return {
+        ...prev,
+        [parentId]: updatedBranches,
+      }
     })
   }
 
@@ -122,6 +200,8 @@ export default function BranchesDemo() {
       messages: [],
       lastResponseId: null,
     })
+    setBranchesByParentLocalId({})
+    setActiveBranchId(null)
     setInputValue("")
     toast.success("Chat cleared")
   }
@@ -180,6 +260,8 @@ export default function BranchesDemo() {
                   key={message.localId}
                   message={message}
                   onBranch={handleBranch}
+                  branches={branchesByParentLocalId[message.localId] || []}
+                  onOpenBranch={handleOpenBranch}
                 />
               ))}
               {isLoading && <TypingIndicator />}
@@ -195,6 +277,15 @@ export default function BranchesDemo() {
           onSend={handleSend}
           disabled={isLoading}
           placeholder="Type a message... (Enter to send, Shift+Enter for newline)"
+        />
+
+        {/* Branch Overlay */}
+        <BranchOverlay
+          branch={activeBranch}
+          parentMessageText={parentMessageText}
+          isOpen={!!activeBranchId}
+          onClose={handleCloseBranch}
+          onUpdateBranch={handleUpdateBranch}
         />
       </div>
     </TooltipProvider>

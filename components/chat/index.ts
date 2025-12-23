@@ -1,3 +1,5 @@
 export { ChatMessageBubble } from "./chat-message"
 export { TypingIndicator } from "./typing-indicator"
 export { Composer } from "./composer"
+export { BranchOverlay } from "./branch-overlay"
+export { BranchChip } from "./branch-chip"
