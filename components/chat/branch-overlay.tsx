@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback } from "react"
-import { GitBranch, Zap, Brain, X } from "lucide-react"
+import { GitBranch, Zap, Brain, MoreHorizontal, Check, FileText, List } from "lucide-react"
 import { toast } from "sonner"
 import {
   Sheet,
@@ -10,23 +10,41 @@ import {
   SheetTitle,
   SheetDescription,
 } from "@/components/ui/sheet"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
 import { Composer } from "./composer"
 import { TypingIndicator } from "./typing-indicator"
 import { cn } from "@/lib/utils"
-import type { BranchThread, ChatMessage, RespondResponse } from "@/lib/types"
+import type { BranchThread, ChatMessage, RespondResponse, SummarizeResponse } from "@/lib/types"
 
 function generateId(): string {
   return crypto.randomUUID()
+}
+
+/**
+ * Result of closing a branch - returned to parent for merge handling
+ */
+export interface BranchCloseResult {
+  /** The branch that was closed */
+  branch: BranchThread
+  /** Whether to merge into main */
+  shouldMerge: boolean
+  /** If merging, the mode to use */
+  mergeMode?: "summary" | "full"
 }
 
 interface BranchOverlayProps {
   branch: BranchThread | null
   parentMessageText: string
   isOpen: boolean
-  onClose: () => void
+  onClose: (result?: BranchCloseResult) => void
   onUpdateBranch: (updatedBranch: BranchThread) => void
 }
 
@@ -39,6 +57,7 @@ export function BranchOverlay({
 }: BranchOverlayProps) {
   const [inputValue, setInputValue] = useState("")
   const [isLoading, setIsLoading] = useState(false)
+  const [isClosing, setIsClosing] = useState(false)
 
   // Refs for autoscroll behavior
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -49,6 +68,7 @@ export function BranchOverlay({
   useEffect(() => {
     setInputValue("")
     shouldAutoScroll.current = true
+    setIsClosing(false)
   }, [branch?.id])
 
   // Track if user has scrolled away from bottom
@@ -85,6 +105,52 @@ export function BranchOverlay({
       ...branch,
       includeInMain: checked,
       updatedAt: Date.now(),
+    })
+  }
+
+  // Handle include mode change (advanced)
+  const handleIncludeModeChange = (mode: "summary" | "full") => {
+    if (!branch) return
+    onUpdateBranch({
+      ...branch,
+      includeMode: mode,
+      updatedAt: Date.now(),
+    })
+  }
+
+  // Handle closing the sheet
+  const handleSheetClose = async () => {
+    if (!branch || isClosing) return
+
+    // If no messages or not including in main, just close
+    if (branch.messages.length === 0 || !branch.includeInMain) {
+      if (branch.messages.length > 0 && !branch.includeInMain) {
+        toast.info("Branch kept separate", {
+          description: "Side thread was not merged into main.",
+        })
+      }
+      onClose({
+        branch,
+        shouldMerge: false,
+      })
+      return
+    }
+
+    // Already merged - just close
+    if (branch.mergedIntoMain) {
+      onClose({
+        branch,
+        shouldMerge: false,
+      })
+      return
+    }
+
+    // Need to merge - signal parent to handle it
+    setIsClosing(true)
+    onClose({
+      branch,
+      shouldMerge: true,
+      mergeMode: branch.includeMode,
     })
   }
 
@@ -178,7 +244,7 @@ export function BranchOverlay({
       : parentMessageText
 
   return (
-    <Sheet open={isOpen} onOpenChange={(open) => !open && onClose()}>
+    <Sheet open={isOpen} onOpenChange={(open) => !open && handleSheetClose()}>
       <SheetContent
         side="right"
         className="w-full sm:max-w-md flex flex-col p-0 gap-0"
@@ -189,13 +255,18 @@ export function BranchOverlay({
             <div className="flex items-center gap-2">
               <GitBranch className="h-4 w-4 text-muted-foreground" />
               <SheetTitle className="text-base">Side thread</SheetTitle>
+              {branch.mergedIntoMain && (
+                <span className="text-[10px] bg-green-500/10 text-green-600 dark:text-green-400 px-1.5 py-0.5 rounded-full font-medium">
+                  merged
+                </span>
+              )}
             </div>
-            {/* Fast/Deep toggle */}
-            <div className="flex items-center gap-1 bg-muted rounded-full p-0.5">
+            {/* Fast/Deep segmented control */}
+            <div className="flex items-center gap-1 bg-muted rounded-lg p-0.5">
               <button
                 onClick={() => handleModeChange("fast")}
                 className={cn(
-                  "flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium transition-colors",
+                  "flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium transition-all duration-200",
                   branch.mode === "fast"
                     ? "bg-background text-foreground shadow-sm"
                     : "text-muted-foreground hover:text-foreground"
@@ -207,7 +278,7 @@ export function BranchOverlay({
               <button
                 onClick={() => handleModeChange("deep")}
                 className={cn(
-                  "flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium transition-colors",
+                  "flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium transition-all duration-200",
                   branch.mode === "deep"
                     ? "bg-background text-foreground shadow-sm"
                     : "text-muted-foreground hover:text-foreground"
@@ -218,26 +289,72 @@ export function BranchOverlay({
               </button>
             </div>
           </div>
-          <SheetDescription className="text-xs text-muted-foreground line-clamp-1 text-left">
+          <SheetDescription className="text-xs text-muted-foreground/70 line-clamp-1 text-left italic">
             Branched from: &ldquo;{truncatedParentText}&rdquo;
           </SheetDescription>
         </SheetHeader>
 
-        {/* Include in main toggle */}
-        <div className="px-4 py-2 border-b border-border shrink-0">
+        {/* Include in main toggle with advanced options */}
+        <div className="px-4 py-2.5 border-b border-border shrink-0 bg-muted/30">
           <div className="flex items-center justify-between">
-            <Label
-              htmlFor="include-in-main"
-              className="text-xs text-muted-foreground cursor-pointer"
-            >
-              Include branch in main chat context
-            </Label>
+            <div className="flex items-center gap-2">
+              <Label
+                htmlFor="include-in-main"
+                className="text-xs text-muted-foreground cursor-pointer"
+              >
+                Include in main context
+              </Label>
+              {/* Advanced options dropdown - only show when include is enabled */}
+              {branch.includeInMain && (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-5 w-5 text-muted-foreground hover:text-foreground"
+                    >
+                      <MoreHorizontal className="h-3 w-3" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" className="w-48">
+                    <DropdownMenuItem
+                      onClick={() => handleIncludeModeChange("summary")}
+                      className="flex items-center gap-2 cursor-pointer"
+                    >
+                      <List className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span className="flex-1">Include as summary</span>
+                      {branch.includeMode === "summary" && (
+                        <Check className="h-3.5 w-3.5 text-primary" />
+                      )}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onClick={() => handleIncludeModeChange("full")}
+                      className="flex items-center gap-2 cursor-pointer"
+                    >
+                      <FileText className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span className="flex-1">Include full transcript</span>
+                      {branch.includeMode === "full" && (
+                        <Check className="h-3.5 w-3.5 text-primary" />
+                      )}
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
+            </div>
             <Switch
               id="include-in-main"
               checked={branch.includeInMain}
               onCheckedChange={handleIncludeInMainChange}
+              disabled={branch.mergedIntoMain}
             />
           </div>
+          {branch.includeInMain && !branch.mergedIntoMain && (
+            <p className="text-[10px] text-muted-foreground/60 mt-1">
+              {branch.includeMode === "summary"
+                ? "Summary will be added to main chat when closed"
+                : "Full transcript will be added to main chat when closed"}
+            </p>
+          )}
         </div>
 
         {/* Messages area */}
@@ -274,16 +391,31 @@ export function BranchOverlay({
           value={inputValue}
           onChange={setInputValue}
           onSend={handleSend}
-          disabled={isLoading}
+          disabled={isLoading || isClosing}
           placeholder="Continue side thread..."
           className="border-t"
         />
+
+        {/* Loading overlay when closing/merging */}
+        {isClosing && (
+          <div className="absolute inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50">
+            <div className="flex flex-col items-center gap-2">
+              <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+              <p className="text-sm text-muted-foreground">
+                {branch.includeMode === "summary" ? "Summarizing..." : "Merging..."}
+              </p>
+            </div>
+          </div>
+        )}
       </SheetContent>
     </Sheet>
   )
 }
 
-// Simplified message component for branch (no branch button - no nesting)
+/**
+ * Simplified message component for branch (no branch button - no nesting allowed)
+ * NOTE: "No nesting" means you cannot create a branch from inside a branch.
+ */
 function BranchMessage({ message }: { message: ChatMessage }) {
   const isUser = message.role === "user"
 
