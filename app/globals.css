@@ -173,3 +173,19 @@ body {
 .animation-delay-300 {
   animation-delay: 0.3s;
 }
+
+/* Chip/badge fade + scale animation */
+@keyframes chip-in {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.animate-chip-in {
+  animation: chip-in 0.25s ease-out forwards;
+}

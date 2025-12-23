@@ -11,11 +11,13 @@ import {
   Composer,
   BranchOverlay,
 } from "@/components/chat"
+import type { BranchCloseResult } from "@/components/chat"
 import type {
   ChatMessage,
   MainThreadState,
   RespondResponse,
   BranchThread,
+  SummarizeResponse,
 } from "@/lib/types"
 
 function generateId(): string {
@@ -30,6 +32,7 @@ export default function BranchesDemo() {
   })
   const [inputValue, setInputValue] = useState("")
   const [isLoading, setIsLoading] = useState(false)
+  const [isMerging, setIsMerging] = useState(false)
 
   // Branch state management
   const [branchesByParentLocalId, setBranchesByParentLocalId] = useState<
@@ -81,7 +84,7 @@ export default function BranchesDemo() {
   // Handle sending a message in main thread
   const handleSend = async () => {
     const userText = inputValue.trim()
-    if (!userText || isLoading) return
+    if (!userText || isLoading || isMerging) return
 
     const userMessage: ChatMessage = {
       localId: generateId(),
@@ -157,6 +160,7 @@ export default function BranchesDemo() {
       includeMode: "summary",
       messages: [],
       lastResponseId: null,
+      mergedIntoMain: false,
     }
 
     // Add to branches map
@@ -174,9 +178,156 @@ export default function BranchesDemo() {
     setActiveBranchId(branchId)
   }
 
+  // Perform merge operation: summarize or full transcript injection
+  const performMerge = async (
+    branch: BranchThread,
+    mergeMode: "summary" | "full"
+  ): Promise<{ contextText: string; newResponseId: string } | null> => {
+    try {
+      let contextInput: string
+
+      if (mergeMode === "summary") {
+        // Call summarize API
+        const summarizeRes = await fetch("/api/summarize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            branchMessages: branch.messages.map((m) => ({
+              role: m.role as "user" | "assistant",
+              text: m.text,
+            })),
+          }),
+        })
+
+        const summarizeData = await summarizeRes.json()
+
+        if (!summarizeRes.ok) {
+          throw new Error(summarizeData.error || "Failed to summarize")
+        }
+
+        const summary = (summarizeData as SummarizeResponse).summary
+        contextInput = `Context from a side thread "${branch.title}" (summary):\n${summary}`
+      } else {
+        // Full transcript
+        const transcript = branch.messages
+          .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.text}`)
+          .join("\n\n")
+        contextInput = `Context from a side thread "${branch.title}" (full transcript):\n${transcript}`
+      }
+
+      // Ingest into main chain by calling /api/respond
+      const respondRes = await fetch("/api/respond", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          input: contextInput,
+          previous_response_id: state.lastResponseId,
+          mode: "deep", // Use deep mode for context ingestion
+        }),
+      })
+
+      const respondData = await respondRes.json()
+
+      if (!respondRes.ok) {
+        throw new Error(respondData.error || "Failed to ingest context")
+      }
+
+      return {
+        contextText:
+          mergeMode === "summary"
+            ? contextInput.replace(
+                `Context from a side thread "${branch.title}" (summary):\n`,
+                ""
+              )
+            : `Full transcript from "${branch.title}" merged`,
+        newResponseId: respondData.id,
+      }
+    } catch (error) {
+      console.error("Merge error:", error)
+      throw error
+    }
+  }
+
   // Handle closing the branch overlay
-  const handleCloseBranch = () => {
-    setActiveBranchId(null)
+  const handleCloseBranch = async (result?: BranchCloseResult) => {
+    if (!result) {
+      setActiveBranchId(null)
+      return
+    }
+
+    const { branch, shouldMerge, mergeMode } = result
+
+    if (!shouldMerge) {
+      setActiveBranchId(null)
+      return
+    }
+
+    // Perform the merge
+    setIsMerging(true)
+    shouldAutoScroll.current = true
+
+    try {
+      const mergeResult = await performMerge(branch, mergeMode || "summary")
+
+      if (mergeResult) {
+        // Create context card message for UI
+        const contextMessage: ChatMessage = {
+          localId: generateId(),
+          role: "context",
+          text: mergeResult.contextText,
+          createdAt: Date.now(),
+          contextMeta: {
+            branchId: branch.id,
+            branchTitle: branch.title,
+            mergeType: mergeMode || "summary",
+          },
+        }
+
+        // Update main state with context message and new response ID
+        // NOTE: We hide the assistant ack message - just update the chain ID
+        setState((prev) => ({
+          messages: [...prev.messages, contextMessage],
+          lastResponseId: mergeResult.newResponseId,
+        }))
+
+        // Mark branch as merged
+        const updatedBranch: BranchThread = {
+          ...branch,
+          mergedIntoMain: true,
+          mergedAs: mergeMode || "summary",
+          mergedAt: Date.now(),
+          updatedAt: Date.now(),
+        }
+
+        setBranchesByParentLocalId((prev) => {
+          const parentId = branch.parentAssistantLocalId
+          const branches = prev[parentId] || []
+          const updatedBranches = branches.map((b) =>
+            b.id === branch.id ? updatedBranch : b
+          )
+          return {
+            ...prev,
+            [parentId]: updatedBranches,
+          }
+        })
+
+        toast.success(
+          mergeMode === "summary"
+            ? "Branch merged into main (summary)"
+            : "Branch merged into main (full transcript)",
+          {
+            description: `Context from "${branch.title}" is now available in the main chat.`,
+          }
+        )
+      }
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : "Failed to merge branch"
+      toast.error("Merge failed", { description: errorMessage })
+    } finally {
+      setIsMerging(false)
+      setActiveBranchId(null)
+    }
   }
 
   // Handle updating a branch (from overlay)
@@ -275,7 +426,7 @@ export default function BranchesDemo() {
           value={inputValue}
           onChange={setInputValue}
           onSend={handleSend}
-          disabled={isLoading}
+          disabled={isLoading || isMerging}
           placeholder="Type a message... (Enter to send, Shift+Enter for newline)"
         />
 
@@ -287,6 +438,18 @@ export default function BranchesDemo() {
           onClose={handleCloseBranch}
           onUpdateBranch={handleUpdateBranch}
         />
+
+        {/* Merging overlay */}
+        {isMerging && (
+          <div className="fixed inset-0 bg-background/50 backdrop-blur-sm flex items-center justify-center z-50">
+            <div className="bg-card rounded-lg p-6 shadow-lg flex flex-col items-center gap-3">
+              <div className="w-10 h-10 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+              <p className="text-sm text-muted-foreground">
+                Merging branch into main context...
+              </p>
+            </div>
+          </div>
+        )}
       </div>
     </TooltipProvider>
   )

@@ -1,6 +1,6 @@
 "use client"
 
-import { GitBranch } from "lucide-react"
+import { GitBranch, GitMerge, List, FileText } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import {
@@ -26,6 +26,7 @@ export function ChatMessageBubble({
 }: ChatMessageProps) {
   const isUser = message.role === "user"
   const isAssistant = message.role === "assistant"
+  const isContext = message.role === "context"
 
   const handleBranch = () => {
     if (isAssistant && message.responseId && onBranch) {
@@ -37,6 +38,47 @@ export function ChatMessageBubble({
     if (onOpenBranch) {
       onOpenBranch(branchId)
     }
+  }
+
+  // Render context card for merged branch content
+  if (isContext && message.contextMeta) {
+    const { branchTitle, mergeType } = message.contextMeta
+    const isSummary = mergeType === "summary"
+
+    return (
+      <div className="flex w-full justify-center animate-chip-in">
+        <div className="max-w-[90%] w-full">
+          <div className="bg-gradient-to-r from-emerald-500/5 via-emerald-500/10 to-emerald-500/5 dark:from-emerald-500/10 dark:via-emerald-500/15 dark:to-emerald-500/10 border border-emerald-500/20 rounded-xl px-4 py-3">
+            {/* Header */}
+            <div className="flex items-center gap-2 mb-2">
+              <div className="flex items-center justify-center w-6 h-6 rounded-full bg-emerald-500/20">
+                <GitMerge className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+              </div>
+              <span className="text-xs font-medium text-emerald-700 dark:text-emerald-300">
+                Context merged from &ldquo;{branchTitle}&rdquo;
+              </span>
+              <span className="ml-auto flex items-center gap-1 text-[10px] text-emerald-600/70 dark:text-emerald-400/70">
+                {isSummary ? (
+                  <>
+                    <List className="h-2.5 w-2.5" />
+                    summary
+                  </>
+                ) : (
+                  <>
+                    <FileText className="h-2.5 w-2.5" />
+                    full
+                  </>
+                )}
+              </span>
+            </div>
+            {/* Content */}
+            <div className="text-sm text-foreground/80 whitespace-pre-wrap leading-relaxed">
+              {message.text}
+            </div>
+          </div>
+        </div>
+      </div>
+    )
   }
 
   return (
