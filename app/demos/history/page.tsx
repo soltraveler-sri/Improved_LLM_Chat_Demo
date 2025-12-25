@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect, useMemo, useCallback } from "react"
+import Link from "next/link"
 import {
   History,
   Search,
@@ -18,6 +19,7 @@ import {
   RefreshCw,
   MoreHorizontal,
   Sparkles,
+  Plus,
 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
@@ -320,9 +322,16 @@ export default function HistoryDemo() {
       <div className="w-64 border-r border-border flex flex-col">
         {/* Header */}
         <div className="p-4 border-b border-border">
-          <div className="flex items-center gap-2 text-lg font-semibold">
-            <History className="h-5 w-5" />
-            Smart Stacks
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-lg font-semibold">
+              <History className="h-5 w-5" />
+              Smart Stacks
+            </div>
+            <Link href="/demos/history/chat">
+              <Button variant="ghost" size="icon" className="h-8 w-8">
+                <Plus className="h-4 w-4" />
+              </Button>
+            </Link>
           </div>
           <p className="text-xs text-muted-foreground mt-1">
             AI-organized conversations
