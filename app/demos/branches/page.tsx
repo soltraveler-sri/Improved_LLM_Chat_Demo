@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback, useMemo } from "react"
-import { RotateCcw, MessageSquare } from "lucide-react"
+import { RotateCcw, MessageSquare, Loader2 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { TooltipProvider } from "@/components/ui/tooltip"
@@ -439,13 +439,31 @@ export default function BranchesDemo() {
           onUpdateBranch={handleUpdateBranch}
         />
 
-        {/* Merging overlay */}
+        {/* Merging overlay - animated and polished */}
         {isMerging && (
           <div className="fixed inset-0 bg-background/50 backdrop-blur-sm flex items-center justify-center z-50">
-            <div className="bg-card rounded-lg p-6 shadow-lg flex flex-col items-center gap-3">
-              <div className="w-10 h-10 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-              <p className="text-sm text-muted-foreground">
-                Merging branch into main context...
+            <div className="bg-card border border-border rounded-xl p-6 shadow-xl flex flex-col items-center gap-4 min-w-[280px]">
+              {/* Animated spinner using Loader2 */}
+              <Loader2 className="h-10 w-10 text-primary animate-spin" />
+
+              {/* Title and subtitle */}
+              <div className="text-center space-y-1">
+                <h3 className="text-sm font-medium text-foreground">
+                  Adding to main context
+                </h3>
+                <p className="text-xs text-muted-foreground">
+                  Merging branch into main conversation…
+                </p>
+              </div>
+
+              {/* Animated shimmer progress bar */}
+              <div className="w-full h-1 bg-muted rounded-full overflow-hidden">
+                <div className="h-full w-1/2 bg-gradient-to-r from-transparent via-primary/50 to-transparent animate-shimmer" />
+              </div>
+
+              {/* Timing hint */}
+              <p className="text-[10px] text-muted-foreground/60">
+                Usually takes 1–3 seconds
               </p>
             </div>
           </div>
