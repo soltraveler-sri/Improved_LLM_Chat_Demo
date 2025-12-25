@@ -24,6 +24,68 @@ function generateId(): string {
   return crypto.randomUUID()
 }
 
+// =============================================================================
+// PERSISTENCE HELPERS (fire-and-forget, best-effort)
+// These functions mirror main thread messages to the store for Demo 2/3.
+// They MUST NOT block or affect Demo 1 behavior.
+// =============================================================================
+
+/**
+ * Create a new stored thread (fire-and-forget)
+ * Returns the thread ID or null if failed
+ */
+async function createStoredThread(title?: string): Promise<string | null> {
+  try {
+    const res = await fetch("/api/chats", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: title || "New Chat", category: "recent" }),
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    return data.thread?.id ?? null
+  } catch {
+    // Silently ignore - persistence is best-effort
+    return null
+  }
+}
+
+/**
+ * Append a message to stored thread (fire-and-forget)
+ */
+function persistMessage(
+  threadId: string,
+  message: { id: string; role: string; text: string; createdAt: number; responseId?: string }
+): void {
+  // Fire and forget - don't await
+  fetch(`/api/chats/${threadId}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(message),
+  }).catch(() => {
+    // Silently ignore - persistence is best-effort
+  })
+}
+
+/**
+ * Update stored thread metadata (fire-and-forget)
+ */
+function updateStoredThread(
+  threadId: string,
+  updates: { title?: string; lastResponseId?: string | null }
+): void {
+  // Fire and forget - don't await
+  fetch(`/api/chats/${threadId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  }).catch(() => {
+    // Silently ignore - persistence is best-effort
+  })
+}
+
+// =============================================================================
+
 export default function BranchesDemo() {
   // Main thread state
   const [state, setState] = useState<MainThreadState>({
@@ -39,6 +101,9 @@ export default function BranchesDemo() {
     Record<string, BranchThread[]>
   >({})
   const [activeBranchId, setActiveBranchId] = useState<string | null>(null)
+
+  // Stored thread ID for persistence (Demo 2/3 feature - does not affect Demo 1)
+  const storedThreadIdRef = useRef<string | null>(null)
 
   // Refs for autoscroll behavior
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -101,6 +166,32 @@ export default function BranchesDemo() {
     setIsLoading(true)
     shouldAutoScroll.current = true
 
+    // --- PERSISTENCE (fire-and-forget, best-effort) ---
+    // Create stored thread on first message if not exists
+    if (!storedThreadIdRef.current) {
+      createStoredThread().then((id) => {
+        if (id) {
+          storedThreadIdRef.current = id
+          // Persist the user message after thread is created
+          persistMessage(id, {
+            id: userMessage.localId,
+            role: userMessage.role,
+            text: userMessage.text,
+            createdAt: userMessage.createdAt,
+          })
+        }
+      })
+    } else {
+      // Thread already exists, just persist the user message
+      persistMessage(storedThreadIdRef.current, {
+        id: userMessage.localId,
+        role: userMessage.role,
+        text: userMessage.text,
+        createdAt: userMessage.createdAt,
+      })
+    }
+    // --- END PERSISTENCE ---
+
     try {
       const res = await fetch("/api/respond", {
         method: "POST",
@@ -132,6 +223,22 @@ export default function BranchesDemo() {
         messages: [...prev.messages, assistantMessage],
         lastResponseId: responseData.id,
       }))
+
+      // --- PERSISTENCE (fire-and-forget, best-effort) ---
+      // Persist assistant message and update lastResponseId
+      if (storedThreadIdRef.current) {
+        persistMessage(storedThreadIdRef.current, {
+          id: assistantMessage.localId,
+          role: assistantMessage.role,
+          text: assistantMessage.text,
+          createdAt: assistantMessage.createdAt,
+          responseId: assistantMessage.responseId,
+        })
+        updateStoredThread(storedThreadIdRef.current, {
+          lastResponseId: responseData.id,
+        })
+      }
+      // --- END PERSISTENCE ---
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : "Something went wrong"
@@ -290,6 +397,21 @@ export default function BranchesDemo() {
           lastResponseId: mergeResult.newResponseId,
         }))
 
+        // --- PERSISTENCE (fire-and-forget, best-effort) ---
+        // Persist context message and update lastResponseId
+        if (storedThreadIdRef.current) {
+          persistMessage(storedThreadIdRef.current, {
+            id: contextMessage.localId,
+            role: contextMessage.role,
+            text: contextMessage.text,
+            createdAt: contextMessage.createdAt,
+          })
+          updateStoredThread(storedThreadIdRef.current, {
+            lastResponseId: mergeResult.newResponseId,
+          })
+        }
+        // --- END PERSISTENCE ---
+
         // Mark branch as merged
         const updatedBranch: BranchThread = {
           ...branch,
@@ -354,6 +476,8 @@ export default function BranchesDemo() {
     setBranchesByParentLocalId({})
     setActiveBranchId(null)
     setInputValue("")
+    // Clear stored thread ID so a new thread is created on next message
+    storedThreadIdRef.current = null
     toast.success("Chat cleared")
   }
 
