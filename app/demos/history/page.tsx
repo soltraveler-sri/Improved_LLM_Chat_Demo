@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useMemo } from "react"
+import { useState, useEffect, useMemo, useCallback } from "react"
 import {
   History,
   Search,
@@ -15,10 +15,24 @@ import {
   ChevronRight,
   Loader2,
   X,
+  RefreshCw,
+  MoreHorizontal,
+  Sparkles,
 } from "lucide-react"
+import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  DropdownMenuSub,
+  DropdownMenuSubTrigger,
+  DropdownMenuSubContent,
+  DropdownMenuSeparator,
+} from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
 import type {
   StoredChatCategory,
@@ -37,6 +51,17 @@ const CATEGORY_ICON_MAP: Record<StoredChatCategory, React.ReactNode> = {
   personal: <User className="h-4 w-4" />,
   travel: <Plane className="h-4 w-4" />,
   shopping: <ShoppingCart className="h-4 w-4" />,
+}
+
+// Small icons for dropdown menu
+const CATEGORY_ICON_SMALL: Record<StoredChatCategory, React.ReactNode> = {
+  recent: <Clock className="h-3 w-3" />,
+  professional: <Briefcase className="h-3 w-3" />,
+  coding: <Code className="h-3 w-3" />,
+  short_qa: <MessageCircle className="h-3 w-3" />,
+  personal: <User className="h-3 w-3" />,
+  travel: <Plane className="h-3 w-3" />,
+  shopping: <ShoppingCart className="h-3 w-3" />,
 }
 
 /**
@@ -69,6 +94,14 @@ function formatDate(timestamp: number): string {
   })
 }
 
+/**
+ * Format last refresh time with helpful label
+ */
+function formatLastRefresh(timestamp: number | null): string {
+  if (!timestamp) return "Not yet refreshed"
+  return `Last refresh: ${formatRelativeTime(timestamp)}`
+}
+
 export default function HistoryDemo() {
   // State
   const [threads, setThreads] = useState<StoredChatThreadMeta[]>([])
@@ -82,35 +115,40 @@ export default function HistoryDemo() {
   )
   const [isLoading, setIsLoading] = useState(true)
   const [isLoadingThread, setIsLoadingThread] = useState(false)
+  const [isRefreshing, setIsRefreshing] = useState(false)
+  const [refreshProgress, setRefreshProgress] = useState<string | null>(null)
 
-  // Fetch threads and stacks meta on mount
-  useEffect(() => {
-    async function fetchData() {
-      setIsLoading(true)
-      try {
-        const [threadsRes, metaRes] = await Promise.all([
-          fetch("/api/chats"),
-          fetch("/api/stacks/meta"),
-        ])
+  // Fetch threads and stacks meta
+  const fetchData = useCallback(async () => {
+    try {
+      const [threadsRes, metaRes] = await Promise.all([
+        fetch("/api/chats"),
+        fetch("/api/stacks/meta"),
+      ])
 
-        if (threadsRes.ok) {
-          const data = await threadsRes.json()
-          setThreads(data.threads || [])
-        }
-
-        if (metaRes.ok) {
-          const data = await metaRes.json()
-          setStacksMeta(data)
-        }
-      } catch (error) {
-        console.error("Failed to fetch history data:", error)
-      } finally {
-        setIsLoading(false)
+      if (threadsRes.ok) {
+        const data = await threadsRes.json()
+        setThreads(data.threads || [])
       }
-    }
 
-    fetchData()
+      if (metaRes.ok) {
+        const data = await metaRes.json()
+        setStacksMeta(data)
+      }
+    } catch (error) {
+      console.error("Failed to fetch history data:", error)
+    }
   }, [])
+
+  // Initial fetch
+  useEffect(() => {
+    async function initialFetch() {
+      setIsLoading(true)
+      await fetchData()
+      setIsLoading(false)
+    }
+    initialFetch()
+  }, [fetchData])
 
   // Fetch selected thread details
   useEffect(() => {
@@ -137,10 +175,107 @@ export default function HistoryDemo() {
     fetchThread()
   }, [selectedThreadId])
 
+  // Handle refresh stacks
+  const handleRefreshStacks = async () => {
+    // Count recent chats
+    const recentCount = threads.filter((t) => t.category === "recent").length
+    
+    if (recentCount === 0 && threads.length === 0) {
+      toast.info("No chats to organize", {
+        description: "Start some conversations in Demo 1 first.",
+      })
+      return
+    }
+
+    setIsRefreshing(true)
+    setRefreshProgress(
+      recentCount > 0
+        ? `Sorting ${recentCount} recent chat${recentCount > 1 ? "s" : ""}…`
+        : "Checking for updates…"
+    )
+
+    try {
+      const res = await fetch("/api/stacks/refresh", {
+        method: "POST",
+      })
+
+      const data = await res.json()
+
+      if (!res.ok) {
+        throw new Error(data.error || "Refresh failed")
+      }
+
+      // Update local state with new counts
+      if (data.counts) {
+        setStacksMeta((prev) => ({
+          ...prev,
+          lastRefreshAt: data.lastRefreshAt,
+          counts: data.counts,
+        }))
+      }
+
+      // Refresh the full thread list to get updated data
+      await fetchData()
+
+      if (data.refreshedCount > 0) {
+        toast.success(`Organized ${data.refreshedCount} chats`, {
+          description: "Chats have been sorted into smart stacks.",
+        })
+      } else {
+        toast.info("All caught up!", {
+          description: "No new chats needed organizing.",
+        })
+      }
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : "Failed to refresh stacks"
+      toast.error("Refresh failed", { description: errorMessage })
+    } finally {
+      setIsRefreshing(false)
+      setRefreshProgress(null)
+    }
+  }
+
+  // Handle manual category change
+  const handleMoveToStack = async (
+    threadId: string,
+    newCategory: StoredChatCategory
+  ) => {
+    try {
+      const res = await fetch(`/api/chats/${threadId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ category: newCategory }),
+      })
+
+      if (!res.ok) {
+        throw new Error("Failed to update category")
+      }
+
+      // Update local state
+      setThreads((prev) =>
+        prev.map((t) =>
+          t.id === threadId ? { ...t, category: newCategory } : t
+        )
+      )
+
+      // Update selected thread if it's the one being changed
+      if (selectedThread?.id === threadId) {
+        setSelectedThread((prev) =>
+          prev ? { ...prev, category: newCategory } : prev
+        )
+      }
+
+      toast.success(`Moved to ${CATEGORY_LABELS[newCategory]}`)
+    } catch (error) {
+      console.error("Failed to move thread:", error)
+      toast.error("Failed to move chat")
+    }
+  }
+
   // Calculate category counts from threads (fallback if meta not available)
   const categoryCounts = useMemo(() => {
-    if (stacksMeta?.counts) return stacksMeta.counts
-
+    // Always recalculate from threads for accuracy
     const counts = {} as Record<StoredChatCategory, number>
     for (const cat of STORED_CHAT_CATEGORIES) {
       counts[cat] = 0
@@ -149,7 +284,7 @@ export default function HistoryDemo() {
       counts[thread.category] = (counts[thread.category] || 0) + 1
     }
     return counts
-  }, [threads, stacksMeta])
+  }, [threads])
 
   // Filter threads by search query (GLOBAL - always searches all threads)
   // Note: Category filter only affects display, NOT search scope
@@ -177,6 +312,7 @@ export default function HistoryDemo() {
 
   // Total thread count
   const totalCount = threads.length
+  const recentCount = categoryCounts.recent || 0
 
   return (
     <div className="flex h-full">
@@ -186,11 +322,48 @@ export default function HistoryDemo() {
         <div className="p-4 border-b border-border">
           <div className="flex items-center gap-2 text-lg font-semibold">
             <History className="h-5 w-5" />
-            History
+            Smart Stacks
           </div>
           <p className="text-xs text-muted-foreground mt-1">
-            Browse past conversations
+            AI-organized conversations
           </p>
+        </div>
+
+        {/* Refresh section */}
+        <div className="p-3 border-b border-border bg-muted/30">
+          <Button
+            onClick={handleRefreshStacks}
+            disabled={isRefreshing || isLoading}
+            className="w-full gap-2"
+            size="sm"
+          >
+            {isRefreshing ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span className="truncate">
+                  {refreshProgress || "Refreshing…"}
+                </span>
+              </>
+            ) : (
+              <>
+                <Sparkles className="h-4 w-4" />
+                Refresh Stacks
+                {recentCount > 0 && (
+                  <span className="ml-1 bg-primary-foreground/20 px-1.5 py-0.5 rounded text-[10px]">
+                    {recentCount}
+                  </span>
+                )}
+              </>
+            )}
+          </Button>
+          <div className="mt-2 space-y-0.5">
+            <p className="text-[10px] text-muted-foreground text-center">
+              {formatLastRefresh(stacksMeta?.lastRefreshAt ?? null)}
+            </p>
+            <p className="text-[10px] text-muted-foreground/60 text-center">
+              Runs daily in background • Demo uses manual refresh
+            </p>
+          </div>
         </div>
 
         {/* Category list */}
@@ -222,6 +395,7 @@ export default function HistoryDemo() {
             {STORED_CHAT_CATEGORIES.map((category) => {
               const count = categoryCounts[category] || 0
               const isSelected = selectedCategory === category
+              const isRecent = category === "recent"
 
               return (
                 <button
@@ -231,14 +405,22 @@ export default function HistoryDemo() {
                     "w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors",
                     isSelected
                       ? "bg-primary/10 text-primary font-medium"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                    isRecent && count > 0 && !isSelected && "text-foreground"
                   )}
                 >
                   <div className="flex items-center gap-2">
                     {CATEGORY_ICON_MAP[category]}
                     <span>{CATEGORY_LABELS[category]}</span>
                   </div>
-                  <span className="text-xs bg-muted px-1.5 py-0.5 rounded">
+                  <span
+                    className={cn(
+                      "text-xs px-1.5 py-0.5 rounded",
+                      isRecent && count > 0
+                        ? "bg-primary/20 text-primary"
+                        : "bg-muted"
+                    )}
+                  >
                     {count}
                   </span>
                 </button>
@@ -303,54 +485,109 @@ export default function HistoryDemo() {
               ) : (
                 <div className="p-2 space-y-1">
                   {filteredThreads.map((thread) => (
-                    <button
+                    <div
                       key={thread.id}
-                      onClick={() => setSelectedThreadId(thread.id)}
                       className={cn(
-                        "w-full text-left px-3 py-3 rounded-lg transition-colors group",
+                        "relative rounded-lg transition-colors group",
                         selectedThreadId === thread.id
                           ? "bg-primary/10"
                           : "hover:bg-muted"
                       )}
                     >
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span
-                              className={cn(
-                                "text-sm font-medium truncate",
-                                selectedThreadId === thread.id
-                                  ? "text-primary"
-                                  : "text-foreground"
-                              )}
-                            >
-                              {thread.title}
-                            </span>
+                      <button
+                        onClick={() => setSelectedThreadId(thread.id)}
+                        className="w-full text-left px-3 py-3 pr-10"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={cn(
+                                  "text-sm font-medium truncate",
+                                  selectedThreadId === thread.id
+                                    ? "text-primary"
+                                    : "text-foreground"
+                                )}
+                              >
+                                {thread.title}
+                              </span>
+                            </div>
+                            {thread.summary && (
+                              <p className="text-xs text-muted-foreground truncate mt-0.5">
+                                {thread.summary}
+                              </p>
+                            )}
+                            <div className="flex items-center gap-2 mt-1">
+                              <span className="text-[10px] text-muted-foreground/70">
+                                {formatRelativeTime(thread.updatedAt)}
+                              </span>
+                              <span className="text-[10px] px-1.5 py-0.5 bg-muted rounded text-muted-foreground">
+                                {CATEGORY_LABELS[thread.category]}
+                              </span>
+                            </div>
                           </div>
-                          {thread.summary && (
-                            <p className="text-xs text-muted-foreground truncate mt-0.5">
-                              {thread.summary}
-                            </p>
-                          )}
-                          <div className="flex items-center gap-2 mt-1">
-                            <span className="text-[10px] text-muted-foreground/70">
-                              {formatRelativeTime(thread.updatedAt)}
-                            </span>
-                            <span className="text-[10px] px-1.5 py-0.5 bg-muted rounded text-muted-foreground">
-                              {CATEGORY_LABELS[thread.category]}
-                            </span>
-                          </div>
+                          <ChevronRight
+                            className={cn(
+                              "h-4 w-4 shrink-0 transition-colors mt-1",
+                              selectedThreadId === thread.id
+                                ? "text-primary"
+                                : "text-muted-foreground/50 group-hover:text-muted-foreground"
+                            )}
+                          />
                         </div>
-                        <ChevronRight
-                          className={cn(
-                            "h-4 w-4 shrink-0 transition-colors",
-                            selectedThreadId === thread.id
-                              ? "text-primary"
-                              : "text-muted-foreground/50 group-hover:text-muted-foreground"
-                          )}
-                        />
-                      </div>
-                    </button>
+                      </button>
+
+                      {/* More menu */}
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <button
+                            className={cn(
+                              "absolute right-2 top-3 p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity",
+                              "hover:bg-muted-foreground/10"
+                            )}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
+                          </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="w-48">
+                          <DropdownMenuSub>
+                            <DropdownMenuSubTrigger>
+                              <RefreshCw className="h-3 w-3 mr-2" />
+                              Move to stack
+                            </DropdownMenuSubTrigger>
+                            <DropdownMenuSubContent>
+                              {STORED_CHAT_CATEGORIES.map((category) => (
+                                <DropdownMenuItem
+                                  key={category}
+                                  onClick={() =>
+                                    handleMoveToStack(thread.id, category)
+                                  }
+                                  disabled={thread.category === category}
+                                >
+                                  {CATEGORY_ICON_SMALL[category]}
+                                  <span className="ml-2">
+                                    {CATEGORY_LABELS[category]}
+                                  </span>
+                                  {thread.category === category && (
+                                    <span className="ml-auto text-[10px] text-muted-foreground">
+                                      Current
+                                    </span>
+                                  )}
+                                </DropdownMenuItem>
+                              ))}
+                            </DropdownMenuSubContent>
+                          </DropdownMenuSub>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            onClick={() => setSelectedThreadId(thread.id)}
+                          >
+                            <MessageSquare className="h-3 w-3 mr-2" />
+                            View transcript
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
                   ))}
                 </div>
               )}
@@ -369,12 +606,24 @@ export default function HistoryDemo() {
                   {/* Thread header */}
                   <div className="p-4 border-b border-border bg-background">
                     <div className="flex items-center justify-between">
-                      <div>
-                        <h2 className="font-semibold">{selectedThread.title}</h2>
-                        <p className="text-xs text-muted-foreground mt-0.5">
-                          {formatDate(selectedThread.createdAt)} •{" "}
-                          {selectedThread.messages.length} messages
-                        </p>
+                      <div className="flex-1 min-w-0">
+                        <h2 className="font-semibold truncate">
+                          {selectedThread.title}
+                        </h2>
+                        <div className="flex items-center gap-2 mt-0.5">
+                          <p className="text-xs text-muted-foreground">
+                            {formatDate(selectedThread.createdAt)} •{" "}
+                            {selectedThread.messages.length} messages
+                          </p>
+                          <span className="text-[10px] px-1.5 py-0.5 bg-muted rounded text-muted-foreground">
+                            {CATEGORY_LABELS[selectedThread.category]}
+                          </span>
+                        </div>
+                        {selectedThread.summary && (
+                          <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
+                            {selectedThread.summary}
+                          </p>
+                        )}
                       </div>
                       <Button
                         variant="ghost"
@@ -443,10 +692,13 @@ export default function HistoryDemo() {
                 <div className="rounded-full bg-muted p-4 mb-4">
                   <MessageSquare className="h-8 w-8 text-muted-foreground" />
                 </div>
-                <h3 className="text-lg font-medium mb-2">Select a conversation</h3>
+                <h3 className="text-lg font-medium mb-2">
+                  Select a conversation
+                </h3>
                 <p className="text-sm text-muted-foreground max-w-sm">
                   Choose a conversation from the list to view its transcript.
-                  Search is global and always searches all conversations.
+                  Click &quot;Refresh Stacks&quot; to organize recent chats with
+                  AI.
                 </p>
               </div>
             )}
