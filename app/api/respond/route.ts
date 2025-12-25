@@ -40,19 +40,31 @@ export async function POST(request: NextRequest) {
         ? process.env.OPENAI_REASONING_FAST || "low"
         : process.env.OPENAI_REASONING_DEEP || "medium"
 
-    // Only use verbosity if explicitly set (don't default, as it may cause issues with some models)
-    const textVerbosity = process.env.OPENAI_TEXT_VERBOSITY
-    const maxOutputTokens = parseInt(
-      process.env.OPENAI_MAX_OUTPUT_TOKENS || "600",
-      10
-    )
+    // Check if model supports reasoning
+    const supportsReasoning = /^(o[13](-|$)|gpt-5)/.test(model)
+    
+    // Use text.verbosity to guide response length (not max_output_tokens which causes hard cutoffs)
+    // Default to "low" for concise responses that complete naturally without truncation
+    const textVerbosity = process.env.OPENAI_TEXT_VERBOSITY || "low"
+    
+    // max_output_tokens is only used as a safety limit to prevent runaway costs
+    // Set very high so it doesn't interfere with natural response completion
+    // If not set, don't include it at all (let model use its default)
+    const maxOutputTokens = process.env.OPENAI_MAX_OUTPUT_TOKENS 
+      ? parseInt(process.env.OPENAI_MAX_OUTPUT_TOKENS, 10)
+      : null
 
     const requestParams: OpenAI.Responses.ResponseCreateParams = {
       model,
       input: [{ role: "user", content: body.input }],
       instructions: SYSTEM_INSTRUCTIONS,
-      max_output_tokens: maxOutputTokens,
       store: true,
+    }
+    
+    // Only set max_output_tokens if explicitly configured (as a cost safety limit)
+    // Otherwise, let the model complete naturally guided by verbosity and instructions
+    if (maxOutputTokens) {
+      requestParams.max_output_tokens = maxOutputTokens
     }
 
     if (body.previous_response_id) {
@@ -63,16 +75,16 @@ export async function POST(request: NextRequest) {
     // - o1, o3 series (reasoning models)
     // - gpt-5 series (gpt-5, gpt-5-mini, gpt-5-nano, gpt-5-medium, gpt-5-pro, gpt-5.1, etc.)
     // NOT supported by: gpt-4o, gpt-4o-mini, gpt-4-turbo, gpt-3.5-turbo, etc.
-    const supportsReasoning = /^(o[13](-|$)|gpt-5)/.test(model)
     if (supportsReasoning && reasoningEffort && reasoningEffort !== "none") {
       requestParams.reasoning = {
         effort: reasoningEffort as "low" | "medium" | "high",
       }
     }
 
-    // Configure text output verbosity if explicitly set
-    // Note: Only set if OPENAI_TEXT_VERBOSITY is configured, as some models may not support it
-    if (textVerbosity && ["low", "medium", "high"].includes(textVerbosity)) {
+    // Configure text output verbosity to guide response length naturally
+    // This is the primary mechanism for controlling response length without hard cutoffs
+    // "low" = concise responses, "medium" = balanced, "high" = detailed
+    if (["low", "medium", "high"].includes(textVerbosity)) {
       requestParams.text = {
         format: { type: "text" },
         verbosity: textVerbosity as "low" | "medium" | "high",
@@ -82,11 +94,9 @@ export async function POST(request: NextRequest) {
     // Debug: Log request params
     console.log("OpenAI Request:", {
       model: requestParams.model,
-      hasReasoning: !!requestParams.reasoning,
-      reasoningEffort: requestParams.reasoning?.effort,
-      hasText: !!requestParams.text,
-      textVerbosity: requestParams.text?.verbosity,
-      maxOutputTokens: requestParams.max_output_tokens,
+      reasoningEffort: requestParams.reasoning?.effort || "none",
+      textVerbosity: requestParams.text?.verbosity || "default",
+      maxOutputTokens: requestParams.max_output_tokens || "unlimited",
       hasPreviousResponseId: !!requestParams.previous_response_id,
     })
 
@@ -118,9 +128,16 @@ export async function POST(request: NextRequest) {
         .join("") ||
       ""
 
-    // Debug: Log if output is empty
+    // Debug: Log if output is empty or incomplete
     if (!outputText) {
       console.warn("Empty output_text. Full response output:", JSON.stringify(response.output, null, 2))
+    }
+    
+    if (response.status === "incomplete") {
+      console.warn("Response incomplete:", {
+        reason: response.incomplete_details,
+        suggestion: "If due to max_output_tokens, increase OPENAI_MAX_OUTPUT_TOKENS or remove it entirely",
+      })
     }
 
     return NextResponse.json({
