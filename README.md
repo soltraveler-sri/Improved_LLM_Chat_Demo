@@ -43,8 +43,8 @@ npm run dev
 | `OPENAI_MODEL` | Model to use (e.g., `gpt-4o`, `gpt-5-nano`, `gpt-5-medium`, `o3-mini`) | `gpt-4o` |
 | `OPENAI_REASONING_FAST` | Reasoning effort for fast mode (only for o1, o3, gpt-5 models) | `low` |
 | `OPENAI_REASONING_DEEP` | Reasoning effort for deep mode (only for o1, o3, gpt-5 models) | `medium` |
-| `OPENAI_TEXT_VERBOSITY` | Text output verbosity | `low` |
-| `OPENAI_MAX_OUTPUT_TOKENS` | Max tokens per response | `600` |
+| `OPENAI_TEXT_VERBOSITY` | Response length guidance: `low` (concise), `medium`, `high` (detailed) | `low` |
+| `OPENAI_MAX_OUTPUT_TOKENS` | Cost safety limit only (optional, may truncate if set too low) | unset |
 
 ## API Routes
 
