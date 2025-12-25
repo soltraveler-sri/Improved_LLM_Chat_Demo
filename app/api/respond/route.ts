@@ -58,7 +58,12 @@ export async function POST(request: NextRequest) {
       requestParams.previous_response_id = body.previous_response_id
     }
 
-    if (reasoningEffort && reasoningEffort !== "none") {
+    // Only include reasoning.effort for models that support it:
+    // - o1, o3 series (reasoning models)
+    // - gpt-5 series (gpt-5, gpt-5-mini, gpt-5-nano, gpt-5-medium, gpt-5-pro, gpt-5.1, etc.)
+    // NOT supported by: gpt-4o, gpt-4o-mini, gpt-4-turbo, gpt-3.5-turbo, etc.
+    const supportsReasoning = /^(o[13](-|$)|gpt-5)/.test(model)
+    if (supportsReasoning && reasoningEffort && reasoningEffort !== "none") {
       requestParams.reasoning = {
         effort: reasoningEffort as "low" | "medium" | "high",
       }
