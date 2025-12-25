@@ -40,7 +40,8 @@ export async function POST(request: NextRequest) {
         ? process.env.OPENAI_REASONING_FAST || "low"
         : process.env.OPENAI_REASONING_DEEP || "medium"
 
-    const textVerbosity = process.env.OPENAI_TEXT_VERBOSITY || "low"
+    // Only use verbosity if explicitly set (don't default, as it may cause issues with some models)
+    const textVerbosity = process.env.OPENAI_TEXT_VERBOSITY
     const maxOutputTokens = parseInt(
       process.env.OPENAI_MAX_OUTPUT_TOKENS || "600",
       10
@@ -69,15 +70,37 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    if (textVerbosity) {
+    // Configure text output verbosity if explicitly set
+    // Note: Only set if OPENAI_TEXT_VERBOSITY is configured, as some models may not support it
+    if (textVerbosity && ["low", "medium", "high"].includes(textVerbosity)) {
       requestParams.text = {
-        format: {
-          type: "text",
-        },
+        format: { type: "text" },
+        verbosity: textVerbosity as "low" | "medium" | "high",
       }
     }
 
+    // Debug: Log request params
+    console.log("OpenAI Request:", {
+      model: requestParams.model,
+      hasReasoning: !!requestParams.reasoning,
+      reasoningEffort: requestParams.reasoning?.effort,
+      hasText: !!requestParams.text,
+      textVerbosity: requestParams.text?.verbosity,
+      maxOutputTokens: requestParams.max_output_tokens,
+      hasPreviousResponseId: !!requestParams.previous_response_id,
+    })
+
     const response = await openai.responses.create(requestParams)
+
+    // Debug: Log response structure to help diagnose empty responses
+    console.log("OpenAI Response:", {
+      id: response.id,
+      status: response.status,
+      output_text: response.output_text,
+      output_count: response.output?.length,
+      output_types: response.output?.map((item) => item.type),
+      model: response.model,
+    })
 
     const outputText =
       response.output_text ||
@@ -94,6 +117,11 @@ export async function POST(request: NextRequest) {
         )
         .join("") ||
       ""
+
+    // Debug: Log if output is empty
+    if (!outputText) {
+      console.warn("Empty output_text. Full response output:", JSON.stringify(response.output, null, 2))
+    }
 
     return NextResponse.json({
       id: response.id,
