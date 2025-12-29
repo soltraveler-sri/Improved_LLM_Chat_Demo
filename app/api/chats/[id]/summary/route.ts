@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server"
-import OpenAI from "openai"
 import { getChatStore } from "@/lib/store"
+import {
+  createTextResponse,
+  extractTextOutput,
+  formatOpenAIError,
+  getConfigInfo,
+} from "@/lib/openai"
 
 /**
  * Helper to get demo_uid from cookies
@@ -49,14 +54,6 @@ export async function GET(
     )
   }
 
-  const apiKey = process.env.OPENAI_API_KEY
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: "OPENAI_API_KEY not configured" },
-      { status: 500 }
-    )
-  }
-
   try {
     const { id } = await params
     const store = getChatStore()
@@ -98,36 +95,19 @@ ${transcript}
 
 Summary:`
 
-    // Call OpenAI to generate summary
-    const openai = new OpenAI({ apiKey })
-    const model = process.env.OPENAI_SUMMARY_MODEL || "gpt-4o-mini"
-
+    // Call OpenAI to generate summary using centralized client
+    const config = getConfigInfo("summarize")
     console.log(
-      `[Summary] Generating summary for chat ${id} with model ${model}`
+      `[Summary] Generating summary for chat ${id} with model ${config.model}`
     )
 
-    const response = await openai.responses.create({
-      model,
+    const response = await createTextResponse({
+      kind: "summarize",
       input: prompt,
-      store: false,
-      // Use fast reasoning
-      reasoning: { effort: "none" },
     })
 
     // Extract summary from response
-    let summary = ""
-    if (response.output && response.output.length > 0) {
-      for (const item of response.output) {
-        if (item.type === "message" && item.content) {
-          for (const content of item.content) {
-            if (content.type === "output_text") {
-              summary = content.text.trim()
-              break
-            }
-          }
-        }
-      }
-    }
+    let summary = extractTextOutput(response).trim()
 
     if (!summary) {
       console.warn("[Summary] Empty summary generated, using fallback")
@@ -147,9 +127,7 @@ Summary:`
   } catch (error) {
     console.error("[GET /api/chats/[id]/summary] Error:", error)
 
-    const errorMessage =
-      error instanceof Error ? error.message : "Failed to get summary"
-
-    return NextResponse.json({ error: errorMessage }, { status: 500 })
+    const errorResponse = formatOpenAIError(error, "summarize")
+    return NextResponse.json(errorResponse, { status: 500 })
   }
 }

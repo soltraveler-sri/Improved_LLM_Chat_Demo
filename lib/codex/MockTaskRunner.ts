@@ -8,12 +8,11 @@
  * - Log messages
  */
 
-import OpenAI from "openai"
 import { z } from "zod"
-import { zodTextFormat } from "openai/helpers/zod"
 import type { TaskRunner, StartTaskArgs } from "./TaskRunner"
 import type { CodexTask, WorkspaceSnapshot, CodexFileChange } from "./types"
 import { getCodexStore } from "@/lib/store"
+import { createParsedResponse, getConfigInfo } from "@/lib/openai"
 
 /**
  * Zod schema for structured output from the model
@@ -136,11 +135,6 @@ export class MockTaskRunner implements TaskRunner {
     const { prompt, workspace, demoUid } = args
     const store = getCodexStore()
 
-    const apiKey = process.env.OPENAI_API_KEY
-    if (!apiKey) {
-      throw new Error("OPENAI_API_KEY not configured")
-    }
-
     // Create initial task
     const taskId = generateTaskId()
     const now = Date.now()
@@ -162,24 +156,18 @@ export class MockTaskRunner implements TaskRunner {
     await store.saveTask(demoUid, task)
 
     try {
-      // Build prompt and call OpenAI
+      // Build prompt and call OpenAI using centralized client
       const fullPrompt = buildTaskPrompt(prompt, workspace)
-      const openai = new OpenAI({ apiKey })
-      const model = process.env.OPENAI_CODEX_MODEL || "gpt-4o-mini"
+      const config = getConfigInfo("codex")
 
-      console.log(`[MockTaskRunner] Starting task ${taskId} with model ${model}`)
+      console.log(`[MockTaskRunner] Starting task ${taskId} with model ${config.model}`)
 
-      const response = await openai.responses.parse({
-        model,
+      const { parsed } = await createParsedResponse({
+        kind: "codex",
         input: fullPrompt,
-        store: false,
-        reasoning: { effort: "none" },
-        text: {
-          format: zodTextFormat(TaskOutputSchema, "task_output"),
-        },
+        schema: TaskOutputSchema,
+        schemaName: "task_output",
       })
-
-      const parsed = response.output_parsed as TaskOutput | null
 
       if (!parsed) {
         throw new Error("Failed to parse task output")

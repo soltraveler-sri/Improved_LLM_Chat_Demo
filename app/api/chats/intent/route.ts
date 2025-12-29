@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
-import OpenAI from "openai"
 import { z } from "zod"
-import { zodTextFormat } from "openai/helpers/zod"
+import { createParsedResponse, formatOpenAIError } from "@/lib/openai"
 
 // ---------------------------------------------------------------------------
 // POST /api/chats/intent
@@ -39,9 +38,6 @@ const IntentOutputSchema = z.object({
 })
 
 type IntentOutput = z.infer<typeof IntentOutputSchema>
-
-// Default model: gpt-5-nano (fast)
-const DEFAULT_INTENT_MODEL = "gpt-5-nano"
 
 function buildIntentPrompt(
   message: string,
@@ -100,33 +96,16 @@ export async function POST(request: NextRequest) {
 
     const { message, context } = parseResult.data
 
-    // Check for API key
-    const apiKey = process.env.OPENAI_API_KEY
-    if (!apiKey) {
-      return NextResponse.json(
-        { error: "OpenAI API key not configured" },
-        { status: 500 }
-      )
-    }
-
-    const openai = new OpenAI({ apiKey })
-    const model = process.env.OPENAI_CHAT_INTENT_MODEL || DEFAULT_INTENT_MODEL
-
     // Build prompt
     const prompt = buildIntentPrompt(message, context)
 
-    // Call OpenAI with structured output
-    const response = await openai.responses.parse({
-      model,
+    // Call OpenAI with structured output using centralized client
+    const { parsed } = await createParsedResponse({
+      kind: "intent",
       input: prompt,
-      store: false,
-      reasoning: { effort: "none" },
-      text: {
-        format: zodTextFormat(IntentOutputSchema, "intent_classification"),
-      },
+      schema: IntentOutputSchema,
+      schemaName: "intent_classification",
     })
-
-    const parsed = response.output_parsed as IntentOutput | null
 
     if (!parsed) {
       console.error("[POST /api/chats/intent] Failed to parse structured output")
@@ -147,16 +126,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error("[POST /api/chats/intent] Error:", error)
 
-    if (error instanceof OpenAI.APIError) {
-      return NextResponse.json(
-        { error: `OpenAI API error: ${error.message}` },
-        { status: error.status || 500 }
-      )
-    }
-
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unknown error" },
-      { status: 500 }
-    )
+    const errorResponse = formatOpenAIError(error, "intent")
+    return NextResponse.json(errorResponse, { status: 500 })
   }
 }
