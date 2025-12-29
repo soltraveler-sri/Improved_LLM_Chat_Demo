@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server"
-import OpenAI from "openai"
+import {
+  createTextResponse,
+  extractTextOutput,
+  formatOpenAIError,
+} from "@/lib/openai"
 
 export const runtime = "nodejs"
 
@@ -32,17 +36,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ summary: "" })
     }
 
-    const apiKey = process.env.OPENAI_API_KEY
-    if (!apiKey) {
-      return NextResponse.json(
-        { error: "OpenAI API key not configured" },
-        { status: 500 }
-      )
-    }
-
-    const openai = new OpenAI({ apiKey })
-    const model = process.env.OPENAI_MODEL || "gpt-4o"
-
     // Build conversation transcript for summarization
     const transcript = body.branchMessages
       .map((msg) => `${msg.role === "user" ? "User" : "Assistant"}: ${msg.text}`)
@@ -51,31 +44,15 @@ export async function POST(request: NextRequest) {
     const maxBullets = body.maxBullets || 5
     const prompt = `${SUMMARIZE_PROMPT}\n\nLimit to ${maxBullets} bullets maximum.\n\nConversation:\n${transcript}`
 
-    // Use Responses API without previous_response_id (stateless summarize)
-    const response = await openai.responses.create({
-      model,
+    // Use centralized client for summarization
+    // Uses "summarize" kind: gpt-5-nano with reasoning: low
+    const response = await createTextResponse({
+      kind: "summarize",
       input: [{ role: "user", content: prompt }],
       instructions: "You are a concise summarizer. Output only bullet points, nothing else.",
-      max_output_tokens: 300,
-      // No previous_response_id - stateless call
-      // No reasoning effort - simple task
     })
 
-    const outputText =
-      response.output_text ||
-      response.output
-        ?.filter((item): item is OpenAI.Responses.ResponseOutputMessage =>
-          item.type === "message"
-        )
-        .flatMap((msg) =>
-          msg.content
-            .filter((c): c is OpenAI.Responses.ResponseOutputText =>
-              c.type === "output_text"
-            )
-            .map((c) => c.text)
-        )
-        .join("") ||
-      ""
+    const outputText = extractTextOutput(response)
 
     return NextResponse.json({
       summary: outputText.trim(),
@@ -83,16 +60,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error("Summarize API error:", error)
 
-    if (error instanceof OpenAI.APIError) {
-      return NextResponse.json(
-        { error: `OpenAI API error: ${error.message}` },
-        { status: error.status || 500 }
-      )
-    }
-
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unknown error" },
-      { status: 500 }
-    )
+    const errorResponse = formatOpenAIError(error, "summarize")
+    return NextResponse.json(errorResponse, { status: 500 })
   }
 }
