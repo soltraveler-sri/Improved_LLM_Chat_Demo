@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
-import OpenAI from "openai"
 import { z } from "zod"
-import { zodTextFormat } from "openai/helpers/zod"
 import { getChatStore } from "@/lib/store"
 import type { StoredChatCategory, StoredChatThread } from "@/lib/store"
+import { createParsedResponse, formatOpenAIError, getConfigInfo } from "@/lib/openai"
 
 /**
  * Helper to get demo_uid from cookies
@@ -129,14 +128,6 @@ export async function POST(request: NextRequest) {
     )
   }
 
-  const apiKey = process.env.OPENAI_API_KEY
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: "OPENAI_API_KEY not configured" },
-      { status: 500 }
-    )
-  }
-
   try {
     const store = getChatStore()
 
@@ -212,30 +203,21 @@ export async function POST(request: NextRequest) {
 
     const prompt = buildCategorizationPrompt(chatPayloads)
 
-    // Step 5: Call OpenAI with structured outputs
-    const openai = new OpenAI({ apiKey })
-    const model = process.env.OPENAI_STACKS_MODEL || "gpt-4o-mini"
-
+    // Step 5: Call OpenAI with structured outputs using centralized client
+    const config = getConfigInfo("stacks")
     console.log(
-      `[Stacks Refresh] Processing ${fullThreads.length} chats with model ${model}`
+      `[Stacks Refresh] Processing ${fullThreads.length} chats with model ${config.model}`
     )
 
-    const response = await openai.responses.parse({
-      model,
+    const { parsed } = await createParsedResponse({
+      kind: "stacks",
       input: prompt,
-      store: false,
-      // Use reasoning.effort: "none" for fast responses
-      reasoning: { effort: "none" },
-      text: {
-        format: zodTextFormat(RefreshOutputSchema, "categorization_result"),
-      },
+      schema: RefreshOutputSchema,
+      schemaName: "categorization_result",
     })
 
-    // Parse the response
-    const parsed = response.output_parsed as RefreshOutput | null
-
     if (!parsed || !parsed.chats) {
-      console.error("[Stacks Refresh] Failed to parse response:", response)
+      console.error("[Stacks Refresh] Failed to parse response")
       return NextResponse.json(
         { error: "Failed to parse categorization response" },
         { status: 500 }
@@ -294,10 +276,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error("[POST /api/stacks/refresh] Error:", error)
 
-    // Provide helpful error message
-    const errorMessage =
-      error instanceof Error ? error.message : "Failed to refresh stacks"
-
-    return NextResponse.json({ error: errorMessage }, { status: 500 })
+    const errorResponse = formatOpenAIError(error, "stacks")
+    return NextResponse.json(errorResponse, { status: 500 })
   }
 }
