@@ -2,8 +2,8 @@ import { NextRequest, NextResponse } from "next/server"
 import OpenAI from "openai"
 import { z } from "zod"
 import { zodTextFormat } from "openai/helpers/zod"
-import { getChatStore } from "@/lib/store/store"
-import type { StoredChatCategory, StoredChatThread } from "@/lib/store/types"
+import { getChatStore } from "@/lib/store"
+import type { StoredChatCategory, StoredChatThread } from "@/lib/store"
 
 /**
  * Helper to get demo_uid from cookies

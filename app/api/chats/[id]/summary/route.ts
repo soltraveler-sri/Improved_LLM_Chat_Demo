@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import OpenAI from "openai"
-import { getChatStore } from "@/lib/store/store"
+import { getChatStore } from "@/lib/store"
 
 /**
  * Helper to get demo_uid from cookies
