@@ -37,14 +37,46 @@ npm run dev
 
 ## Environment Variables
 
+### Required
+
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `OPENAI_API_KEY` | Your OpenAI API key | (required) |
+
+### Model Configuration
+
+| Variable | Description | Default |
+|----------|-------------|---------|
 | `OPENAI_MODEL` | Model to use (e.g., `gpt-4o`, `gpt-5-nano`, `gpt-5-medium`, `o3-mini`) | `gpt-4o` |
 | `OPENAI_REASONING_FAST` | Reasoning effort for fast mode (only for o1, o3, gpt-5 models) | `low` |
 | `OPENAI_REASONING_DEEP` | Reasoning effort for deep mode (only for o1, o3, gpt-5 models) | `medium` |
 | `OPENAI_TEXT_VERBOSITY` | Response length guidance: `low` (concise), `medium`, `high` (detailed) | `low` |
 | `OPENAI_MAX_OUTPUT_TOKENS` | Cost safety limit only (optional, may truncate if set too low) | unset |
+
+### Storage (Vercel KV)
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `KV_REST_API_URL` | Vercel KV REST API URL | Production only |
+| `KV_REST_API_TOKEN` | Vercel KV REST API token | Production only |
+
+**Local Development:** Leave KV variables blank. The app uses an in-memory store (data is lost on restart, but that's fine for development).
+
+**Vercel Production:** KV is **required**. Without it, the app will show an error banner and storage operations will fail.
+
+#### Setting up Vercel KV
+
+1. Go to your [Vercel project dashboard](https://vercel.com/dashboard)
+2. Navigate to **Storage** → **Create Database** → **KV**
+3. Follow the prompts to create a new KV store
+4. Link it to your project (environment variables are automatically populated)
+5. Redeploy your app
+
+#### Storage Details
+
+- **TTL:** All data expires after 7 days to prevent unbounded growth
+- **Namespacing:** Keys are prefixed with user ID (`u:{demo_uid}:...`)
+- **Identity:** Users are identified by a `demo_uid` cookie (no accounts needed)
 
 ## API Routes
 

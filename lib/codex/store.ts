@@ -9,18 +9,24 @@ import type { CodexTask, WorkspaceSnapshot } from "./types"
 import { DEFAULT_WORKSPACE_FILES } from "./types"
 
 /**
+ * TTL for KV keys (7 days in seconds)
+ */
+const KV_TTL_SECONDS = 7 * 24 * 60 * 60 // 604800 seconds
+
+/**
  * Key generation helpers
+ * Namespace: u:{demo_uid}:codex:* for codex-related keys
  */
 function taskKey(demoUid: string, taskId: string): string {
-  return `codex:${demoUid}:task:${taskId}`
+  return `u:${demoUid}:codex:task:${taskId}`
 }
 
 function taskListKey(demoUid: string): string {
-  return `codex:${demoUid}:tasks`
+  return `u:${demoUid}:codex:tasks`
 }
 
 function workspaceKey(demoUid: string): string {
-  return `codex:${demoUid}:workspace`
+  return `u:${demoUid}:codex:workspace`
 }
 
 /**
@@ -28,6 +34,29 @@ function workspaceKey(demoUid: string): string {
  */
 function isKvAvailable(): boolean {
   return !!(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN)
+}
+
+/**
+ * Check if we're in development mode
+ */
+function isDevelopment(): boolean {
+  return process.env.NODE_ENV === "development"
+}
+
+/**
+ * Log store operations (one line per request)
+ */
+function logOp(
+  storeType: "KV" | "Memory",
+  operation: string,
+  demoUid: string,
+  extra?: string
+): void {
+  const uid = demoUid.slice(0, 8)
+  const msg = extra
+    ? `[CodexStore:${storeType}] ${operation} uid=${uid} ${extra}`
+    : `[CodexStore:${storeType}] ${operation} uid=${uid}`
+  console.log(msg)
 }
 
 /**
@@ -45,16 +74,19 @@ class MemoryCodexStore {
   }
 
   async getTask(demoUid: string, taskId: string): Promise<CodexTask | null> {
+    logOp("Memory", "getTask", demoUid, `taskId=${taskId.slice(0, 8)}`)
     const userTasks = this.getOrCreateUserTasks(demoUid)
     return userTasks.get(taskId) ?? null
   }
 
   async saveTask(demoUid: string, task: CodexTask): Promise<void> {
+    logOp("Memory", "saveTask", demoUid, `taskId=${task.id.slice(0, 8)}`)
     const userTasks = this.getOrCreateUserTasks(demoUid)
     userTasks.set(task.id, task)
   }
 
   async listTasks(demoUid: string): Promise<CodexTask[]> {
+    logOp("Memory", "listTasks", demoUid)
     const userTasks = this.getOrCreateUserTasks(demoUid)
     const tasks = Array.from(userTasks.values())
     tasks.sort((a, b) => b.createdAt - a.createdAt)
@@ -62,6 +94,7 @@ class MemoryCodexStore {
   }
 
   async getWorkspace(demoUid: string): Promise<WorkspaceSnapshot> {
+    logOp("Memory", "getWorkspace", demoUid)
     const existing = this.workspaces.get(demoUid)
     if (existing) return existing
 
@@ -78,6 +111,7 @@ class MemoryCodexStore {
     demoUid: string,
     workspace: WorkspaceSnapshot
   ): Promise<void> {
+    logOp("Memory", "saveWorkspace", demoUid)
     this.workspaces.set(demoUid, workspace)
   }
 }
@@ -87,6 +121,7 @@ class MemoryCodexStore {
  */
 class KVCodexStore {
   async getTask(demoUid: string, taskId: string): Promise<CodexTask | null> {
+    logOp("KV", "getTask", demoUid, `taskId=${taskId.slice(0, 8)}`)
     try {
       return await kv.get<CodexTask>(taskKey(demoUid, taskId))
     } catch (error) {
@@ -96,15 +131,20 @@ class KVCodexStore {
   }
 
   async saveTask(demoUid: string, task: CodexTask): Promise<void> {
+    logOp("KV", "saveTask", demoUid, `taskId=${task.id.slice(0, 8)}`)
     try {
-      await kv.set(taskKey(demoUid, task.id), task)
+      // Set task with TTL
+      await kv.set(taskKey(demoUid, task.id), task, { ex: KV_TTL_SECONDS })
+      // Add to task list and refresh TTL
       await kv.sadd(taskListKey(demoUid), task.id)
+      await kv.expire(taskListKey(demoUid), KV_TTL_SECONDS)
     } catch (error) {
       console.error("[KVCodexStore] saveTask error:", error)
     }
   }
 
   async listTasks(demoUid: string): Promise<CodexTask[]> {
+    logOp("KV", "listTasks", demoUid)
     try {
       const taskIds = await kv.smembers(taskListKey(demoUid))
       if (!taskIds || taskIds.length === 0) return []
@@ -124,16 +164,17 @@ class KVCodexStore {
   }
 
   async getWorkspace(demoUid: string): Promise<WorkspaceSnapshot> {
+    logOp("KV", "getWorkspace", demoUid)
     try {
       const existing = await kv.get<WorkspaceSnapshot>(workspaceKey(demoUid))
       if (existing) return existing
 
-      // Create default workspace
+      // Create default workspace with TTL
       const workspace: WorkspaceSnapshot = {
         files: { ...DEFAULT_WORKSPACE_FILES },
         updatedAt: Date.now(),
       }
-      await kv.set(workspaceKey(demoUid), workspace)
+      await kv.set(workspaceKey(demoUid), workspace, { ex: KV_TTL_SECONDS })
       return workspace
     } catch (error) {
       console.error("[KVCodexStore] getWorkspace error:", error)
@@ -148,8 +189,9 @@ class KVCodexStore {
     demoUid: string,
     workspace: WorkspaceSnapshot
   ): Promise<void> {
+    logOp("KV", "saveWorkspace", demoUid)
     try {
-      await kv.set(workspaceKey(demoUid), workspace)
+      await kv.set(workspaceKey(demoUid), workspace, { ex: KV_TTL_SECONDS })
     } catch (error) {
       console.error("[KVCodexStore] saveWorkspace error:", error)
     }
@@ -157,16 +199,32 @@ class KVCodexStore {
 }
 
 /**
- * Singleton memory store instance
+ * Singleton store instances (persists across requests)
  */
 let memoryStoreInstance: MemoryCodexStore | null = null
+let kvStoreInstance: KVCodexStore | null = null
+let storeInitLogged = false
 
 function getMemoryStore(): MemoryCodexStore {
   if (!memoryStoreInstance) {
     memoryStoreInstance = new MemoryCodexStore()
-    console.log("[CodexStore] Using in-memory store")
+    if (!storeInitLogged) {
+      console.log("[CodexStore] Initialized in-memory store (development only)")
+      storeInitLogged = true
+    }
   }
   return memoryStoreInstance
+}
+
+function getKVStore(): KVCodexStore {
+  if (!kvStoreInstance) {
+    kvStoreInstance = new KVCodexStore()
+    if (!storeInitLogged) {
+      console.log("[CodexStore] Initialized Vercel KV store")
+      storeInitLogged = true
+    }
+  }
+  return kvStoreInstance
 }
 
 /**
@@ -182,10 +240,28 @@ export interface CodexStore {
 
 /**
  * Get the appropriate store implementation
+ *
+ * Note: This function does NOT enforce the production check - that is done
+ * by the index.ts wrapper. This allows the stores to be used directly in tests.
  */
 export function getCodexStore(): CodexStore {
   if (isKvAvailable()) {
-    return new KVCodexStore()
+    return getKVStore()
   }
+  if (isDevelopment()) {
+    return getMemoryStore()
+  }
+  // This shouldn't happen if called through index.ts, but provide a fallback
+  console.warn(
+    "[CodexStore] WARNING: Using in-memory store in production. " +
+      "Configure KV_REST_API_URL + KV_REST_API_TOKEN for durable storage."
+  )
   return getMemoryStore()
+}
+
+/**
+ * Get the storage type currently in use
+ */
+export function getStorageType(): "kv" | "memory" {
+  return isKvAvailable() ? "kv" : "memory"
 }

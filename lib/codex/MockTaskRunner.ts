@@ -13,7 +13,7 @@ import { z } from "zod"
 import { zodTextFormat } from "openai/helpers/zod"
 import type { TaskRunner, StartTaskArgs } from "./TaskRunner"
 import type { CodexTask, WorkspaceSnapshot, CodexFileChange } from "./types"
-import { getCodexStore } from "./store"
+import { getCodexStore } from "@/lib/store"
 
 /**
  * Zod schema for structured output from the model
