@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
-import OpenAI from "openai"
 import { z } from "zod"
-import { zodTextFormat } from "openai/helpers/zod"
 import { getChatStore } from "@/lib/store"
 import type { StoredChatThreadMeta } from "@/lib/store"
+import { createParsedResponse, formatOpenAIError, getConfigInfo } from "@/lib/openai"
 
 // ---------------------------------------------------------------------------
 // POST /api/chats/find
@@ -53,7 +52,6 @@ interface FindResponse {
 }
 
 // Defaults
-const DEFAULT_FINDER_MODEL = "gpt-5-mini"
 const DEFAULT_MAX_CANDIDATES = 30
 const DEFAULT_TOPK = 5
 const MAX_CANDIDATES_CAP = 60
@@ -222,15 +220,6 @@ export async function POST(request: NextRequest) {
 
     const topK = envTopK ? parseInt(envTopK, 10) : DEFAULT_TOPK
 
-    // Check for API key
-    const apiKey = process.env.OPENAI_API_KEY
-    if (!apiKey) {
-      return NextResponse.json(
-        { error: "OpenAI API key not configured" },
-        { status: 500 }
-      )
-    }
-
     // Step A: Load all chats and generate candidates locally
     const store = getChatStore()
     const allChats = await store.listThreads(demoUid)
@@ -247,23 +236,19 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(response)
     }
 
-    // Step B: LLM rerank
-    const openai = new OpenAI({ apiKey })
-    const model = process.env.OPENAI_CHAT_FINDER_MODEL || DEFAULT_FINDER_MODEL
-
+    // Step B: LLM rerank using centralized client
+    // Uses "finder" kind: gpt-5-mini with reasoning: low (NOT "none"!)
     const prompt = buildRerankPrompt(query, candidates, topK)
+    const config = getConfigInfo("finder")
 
-    const llmResponse = await openai.responses.parse({
-      model,
+    console.log(`[POST /api/chats/find] Reranking ${candidates.length} candidates with model ${config.model}`)
+
+    const { parsed } = await createParsedResponse({
+      kind: "finder",
       input: prompt,
-      store: false,
-      reasoning: { effort: "none" },
-      text: {
-        format: zodTextFormat(RerankOutputSchema, "rerank_results"),
-      },
+      schema: RerankOutputSchema,
+      schemaName: "rerank_results",
     })
-
-    const parsed = llmResponse.output_parsed as RerankOutput | null
 
     if (!parsed) {
       console.error("[POST /api/chats/find] Failed to parse rerank output")
@@ -310,16 +295,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error("[POST /api/chats/find] Error:", error)
 
-    if (error instanceof OpenAI.APIError) {
-      return NextResponse.json(
-        { error: `OpenAI API error: ${error.message}` },
-        { status: error.status || 500 }
-      )
-    }
-
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unknown error" },
-      { status: 500 }
-    )
+    const errorResponse = formatOpenAIError(error, "finder")
+    return NextResponse.json(errorResponse, { status: 500 })
   }
 }
