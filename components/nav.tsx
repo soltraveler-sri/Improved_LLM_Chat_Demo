@@ -47,13 +47,50 @@ interface StorageInfo {
   message: string
 }
 
+/**
+ * API response shape from /api/storage
+ */
+interface StorageApiResponse {
+  storageType?: "kv" | "memory"
+  kvConfigured?: boolean
+  warning?: string
+}
+
+/**
+ * Safely convert API response to StorageInfo format
+ */
+function parseStorageResponse(data: StorageApiResponse): StorageInfo {
+  const storageType = data?.storageType
+  const type: StorageInfo["type"] =
+    storageType === "kv" || storageType === "memory" ? storageType : "error"
+
+  return {
+    type,
+    available: data?.kvConfigured ?? false,
+    message:
+      data?.warning ??
+      (type === "kv"
+        ? "Using Vercel KV for persistent storage."
+        : type === "memory"
+          ? "Using in-memory store. Data may reset."
+          : "Unable to determine storage status."),
+  }
+}
+
 function StorageIndicator() {
   const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null)
 
   useEffect(() => {
     fetch("/api/storage")
-      .then((res) => res.json())
-      .then((data) => setStorageInfo(data))
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`)
+        }
+        return res.json()
+      })
+      .then((data: StorageApiResponse) => {
+        setStorageInfo(parseStorageResponse(data))
+      })
       .catch(() =>
         setStorageInfo({
           type: "error",
@@ -115,9 +152,11 @@ function StorageIndicator() {
           </div>
         </TooltipTrigger>
         <TooltipContent side="bottom" className="max-w-xs">
-          <p className="font-medium">Storage: {storageInfo.type.toUpperCase()}</p>
+          <p className="font-medium">
+            Storage: {(storageInfo.type ?? "unknown").toUpperCase()}
+          </p>
           <p className="text-xs text-muted-foreground mt-1">
-            {storageInfo.message}
+            {storageInfo.message ?? "No additional information."}
           </p>
           {storageInfo.type === "error" && (
             <p className="text-xs text-muted-foreground mt-2">
