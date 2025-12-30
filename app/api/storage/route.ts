@@ -5,9 +5,9 @@ import { getStorageInfo } from "@/lib/store"
  * GET /api/storage - Get current storage status
  *
  * Returns information about the storage backend:
- * - type: "kv" | "memory" | "error"
- * - available: boolean
- * - message: string (human-readable status)
+ * - storageType: "kv" | "memory"
+ * - kvConfigured: boolean
+ * - warning?: string (human-readable warning if using memory store)
  */
 export async function GET() {
   try {
@@ -17,9 +17,9 @@ export async function GET() {
     console.error("[GET /api/storage] Error:", error)
     return NextResponse.json(
       {
-        type: "error",
-        available: false,
-        message:
+        storageType: "memory",
+        kvConfigured: false,
+        warning:
           error instanceof Error ? error.message : "Failed to get storage info",
       },
       { status: 500 }

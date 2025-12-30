@@ -16,6 +16,7 @@ import { TooltipProvider } from "@/components/ui/tooltip"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 import { TaskCard } from "@/components/codex"
+import { StorageWarningBanner } from "@/components/ui/storage-warning-banner"
 import type { CodexTask, WorkspaceSnapshot } from "@/lib/codex/types"
 
 /**
@@ -261,11 +262,15 @@ export default function CodexDemoPage() {
 
   return (
     <TooltipProvider delayDuration={300}>
-      <div className="flex h-full">
-        {/* Main chat area */}
-        <div className="flex-1 flex flex-col">
-          {/* Header */}
-          <div className="flex items-center justify-between p-4 border-b border-border">
+      <div className="flex h-full flex-col">
+        {/* Storage warning banner */}
+        <StorageWarningBanner className="m-2" />
+
+        <div className="flex flex-1 overflow-hidden">
+          {/* Main chat area */}
+          <div className="flex-1 flex flex-col">
+            {/* Header */}
+            <div className="flex items-center justify-between p-4 border-b border-border">
             <div className="flex items-center gap-2">
               <Terminal className="h-5 w-5 text-primary" />
               <span className="font-medium">Codex Demo</span>
@@ -410,6 +415,7 @@ export default function CodexDemoPage() {
             </ScrollArea>
           </div>
         )}
+        </div>
       </div>
     </TooltipProvider>
   )

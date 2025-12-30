@@ -57,12 +57,13 @@ npm run dev
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `KV_REST_API_URL` | Vercel KV REST API URL | Production only |
-| `KV_REST_API_TOKEN` | Vercel KV REST API token | Production only |
+| `KV_REST_API_URL` | Vercel KV REST API URL | Recommended for production |
+| `KV_REST_API_TOKEN` | Vercel KV REST API token | Recommended for production |
+| `KV_REST_API_READ_ONLY_TOKEN` | Vercel KV read-only token (optional) | No |
 
 **Local Development:** Leave KV variables blank. The app uses an in-memory store (data is lost on restart, but that's fine for development).
 
-**Vercel Production:** KV is **required**. Without it, the app will show an error banner and storage operations will fail.
+**Vercel Production:** KV is **recommended** for reliable persistence. Without it, the app gracefully falls back to in-memory storage and displays a warning banner. The app remains fully functional but data may be lost on server restarts or between requests.
 
 #### Setting up Vercel KV
 
@@ -74,9 +75,11 @@ npm run dev
 
 #### Storage Details
 
+- **Resilient fallback:** The app never "bricks" itself due to missing KV - it falls back gracefully with a UI warning
 - **TTL:** All data expires after 7 days to prevent unbounded growth
 - **Namespacing:** Keys are prefixed with user ID (`u:{demo_uid}:...`)
 - **Identity:** Users are identified by a `demo_uid` cookie (no accounts needed)
+- **Status endpoint:** `GET /api/storage` returns current storage status (`storageType`, `kvConfigured`, `warning`)
 
 ## API Routes
 
