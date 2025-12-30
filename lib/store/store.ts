@@ -1,11 +1,12 @@
 /**
- * Chat store abstraction with Vercel KV backend + in-memory fallback
+ * Chat store abstraction with Redis backend + in-memory fallback
  *
  * This provides persistence for Demo 2/3 features without affecting Demo 1.
  * All operations are best-effort - failures should not break the app.
+ * 
+ * Supports both Vercel KV and Upstash Redis env var patterns.
  */
 
-import { kv } from "@vercel/kv"
 import type {
   StoredChatThread,
   StoredChatThreadMeta,
@@ -14,6 +15,7 @@ import type {
   StacksMeta,
 } from "./types"
 import { STORED_CHAT_CATEGORIES } from "./types"
+import { getRedisClient, isRedisConfigured, getStorageMode } from "./redis-client"
 
 /**
  * Store interface for chat persistence
@@ -88,13 +90,6 @@ function calculateCounts(
 }
 
 /**
- * Check if Vercel KV is available (env vars set)
- */
-function isKvAvailable(): boolean {
-  return !!(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN)
-}
-
-/**
  * Check if we're in development mode
  */
 function isDevelopment(): boolean {
@@ -105,7 +100,7 @@ function isDevelopment(): boolean {
  * Log store operations (one line per request)
  */
 function logOp(
-  storeType: "KV" | "Memory",
+  storeType: "Redis" | "Memory",
   operation: string,
   demoUid: string,
   extra?: string
@@ -118,18 +113,22 @@ function logOp(
 }
 
 /**
- * Vercel KV-backed store implementation
+ * Redis-backed store implementation
+ * Works with both Vercel KV and Upstash Redis env var patterns
  */
-class KVStore implements ChatStore {
+class RedisStore implements ChatStore {
   async listThreads(demoUid: string): Promise<StoredChatThreadMeta[]> {
-    logOp("KV", "listThreads", demoUid)
+    logOp("Redis", "listThreads", demoUid)
+    const redis = getRedisClient()
+    if (!redis) return []
+    
     try {
-      const threadIds = await kv.smembers(threadListKey(demoUid))
+      const threadIds = await redis.smembers(threadListKey(demoUid))
       if (!threadIds || threadIds.length === 0) return []
 
       const threads: StoredChatThreadMeta[] = []
       for (const id of threadIds) {
-        const thread = await kv.get<StoredChatThread>(
+        const thread = await redis.get<StoredChatThread>(
           threadKey(demoUid, id as string)
         )
         if (thread) {
@@ -144,7 +143,7 @@ class KVStore implements ChatStore {
       threads.sort((a, b) => b.updatedAt - a.updatedAt)
       return threads
     } catch (error) {
-      console.error("[KVStore] listThreads error:", error)
+      console.error("[RedisStore] listThreads error:", error)
       return []
     }
   }
@@ -153,11 +152,14 @@ class KVStore implements ChatStore {
     demoUid: string,
     threadId: string
   ): Promise<StoredChatThread | null> {
-    logOp("KV", "getThread", demoUid, `threadId=${threadId.slice(0, 8)}`)
+    logOp("Redis", "getThread", demoUid, `threadId=${threadId.slice(0, 8)}`)
+    const redis = getRedisClient()
+    if (!redis) return null
+    
     try {
-      return await kv.get<StoredChatThread>(threadKey(demoUid, threadId))
+      return await redis.get<StoredChatThread>(threadKey(demoUid, threadId))
     } catch (error) {
-      console.error("[KVStore] getThread error:", error)
+      console.error("[RedisStore] getThread error:", error)
       return null
     }
   }
@@ -178,15 +180,18 @@ class KVStore implements ChatStore {
       messages: initial.messages || [],
     }
 
-    logOp("KV", "createThread", demoUid, `threadId=${thread.id.slice(0, 8)}`)
+    logOp("Redis", "createThread", demoUid, `threadId=${thread.id.slice(0, 8)}`)
+    const redis = getRedisClient()
+    if (!redis) return thread
+    
     try {
       // Set thread with TTL
-      await kv.set(threadKey(demoUid, thread.id), thread, { ex: KV_TTL_SECONDS })
+      await redis.set(threadKey(demoUid, thread.id), thread, { ex: KV_TTL_SECONDS })
       // Set index with TTL (refresh on each write)
-      await kv.sadd(threadListKey(demoUid), thread.id)
-      await kv.expire(threadListKey(demoUid), KV_TTL_SECONDS)
+      await redis.sadd(threadListKey(demoUid), thread.id)
+      await redis.expire(threadListKey(demoUid), KV_TTL_SECONDS)
     } catch (error) {
-      console.error("[KVStore] createThread error:", error)
+      console.error("[RedisStore] createThread error:", error)
     }
 
     return thread
@@ -198,15 +203,18 @@ class KVStore implements ChatStore {
     message: StoredChatMessage
   ): Promise<void> {
     logOp(
-      "KV",
+      "Redis",
       "appendMessage",
       demoUid,
       `threadId=${threadId.slice(0, 8)} role=${message.role}`
     )
+    const redis = getRedisClient()
+    if (!redis) return
+    
     try {
       const thread = await this.getThread(demoUid, threadId)
       if (!thread) {
-        console.warn("[KVStore] appendMessage: thread not found", threadId)
+        console.warn("[RedisStore] appendMessage: thread not found", threadId)
         return
       }
 
@@ -217,9 +225,9 @@ class KVStore implements ChatStore {
       }
 
       // Update with TTL refresh
-      await kv.set(threadKey(demoUid, threadId), thread, { ex: KV_TTL_SECONDS })
+      await redis.set(threadKey(demoUid, threadId), thread, { ex: KV_TTL_SECONDS })
     } catch (error) {
-      console.error("[KVStore] appendMessage error:", error)
+      console.error("[RedisStore] appendMessage error:", error)
     }
   }
 
@@ -228,11 +236,14 @@ class KVStore implements ChatStore {
     threadId: string,
     partial: Partial<StoredChatThread>
   ): Promise<void> {
-    logOp("KV", "updateThread", demoUid, `threadId=${threadId.slice(0, 8)}`)
+    logOp("Redis", "updateThread", demoUid, `threadId=${threadId.slice(0, 8)}`)
+    const redis = getRedisClient()
+    if (!redis) return
+    
     try {
       const thread = await this.getThread(demoUid, threadId)
       if (!thread) {
-        console.warn("[KVStore] updateThread: thread not found", threadId)
+        console.warn("[RedisStore] updateThread: thread not found", threadId)
         return
       }
 
@@ -243,26 +254,37 @@ class KVStore implements ChatStore {
       }
 
       // Update with TTL refresh
-      await kv.set(threadKey(demoUid, threadId), updated, { ex: KV_TTL_SECONDS })
+      await redis.set(threadKey(demoUid, threadId), updated, { ex: KV_TTL_SECONDS })
     } catch (error) {
-      console.error("[KVStore] updateThread error:", error)
+      console.error("[RedisStore] updateThread error:", error)
     }
   }
 
   async deleteThread(demoUid: string, threadId: string): Promise<void> {
-    logOp("KV", "deleteThread", demoUid, `threadId=${threadId.slice(0, 8)}`)
+    logOp("Redis", "deleteThread", demoUid, `threadId=${threadId.slice(0, 8)}`)
+    const redis = getRedisClient()
+    if (!redis) return
+    
     try {
-      await kv.del(threadKey(demoUid, threadId))
-      await kv.srem(threadListKey(demoUid), threadId)
+      await redis.del(threadKey(demoUid, threadId))
+      await redis.srem(threadListKey(demoUid), threadId)
     } catch (error) {
-      console.error("[KVStore] deleteThread error:", error)
+      console.error("[RedisStore] deleteThread error:", error)
     }
   }
 
   async getStacksMeta(demoUid: string): Promise<StacksMeta> {
-    logOp("KV", "getStacksMeta", demoUid)
+    logOp("Redis", "getStacksMeta", demoUid)
+    const redis = getRedisClient()
+    if (!redis) {
+      return {
+        lastRefreshAt: null,
+        counts: calculateCounts([]),
+      }
+    }
+    
     try {
-      const meta = await kv.get<{ lastRefreshAt: number | null }>(
+      const meta = await redis.get<{ lastRefreshAt: number | null }>(
         stacksMetaKey(demoUid)
       )
       const threads = await this.listThreads(demoUid)
@@ -271,7 +293,7 @@ class KVStore implements ChatStore {
         counts: calculateCounts(threads),
       }
     } catch (error) {
-      console.error("[KVStore] getStacksMeta error:", error)
+      console.error("[RedisStore] getStacksMeta error:", error)
       return {
         lastRefreshAt: null,
         counts: calculateCounts([]),
@@ -280,11 +302,14 @@ class KVStore implements ChatStore {
   }
 
   async setLastStacksRefreshAt(demoUid: string, ts: number): Promise<void> {
-    logOp("KV", "setLastStacksRefreshAt", demoUid)
+    logOp("Redis", "setLastStacksRefreshAt", demoUid)
+    const redis = getRedisClient()
+    if (!redis) return
+    
     try {
-      await kv.set(stacksMetaKey(demoUid), { lastRefreshAt: ts }, { ex: KV_TTL_SECONDS })
+      await redis.set(stacksMetaKey(demoUid), { lastRefreshAt: ts }, { ex: KV_TTL_SECONDS })
     } catch (error) {
-      console.error("[KVStore] setLastStacksRefreshAt error:", error)
+      console.error("[RedisStore] setLastStacksRefreshAt error:", error)
     }
   }
 }
@@ -415,7 +440,7 @@ class MemoryStore implements ChatStore {
  * Singleton store instances (persists across requests)
  */
 let memoryStoreInstance: MemoryStore | null = null
-let kvStoreInstance: KVStore | null = null
+let redisStoreInstance: RedisStore | null = null
 let storeInitLogged = false
 
 function getMemoryStore(): MemoryStore {
@@ -429,15 +454,15 @@ function getMemoryStore(): MemoryStore {
   return memoryStoreInstance
 }
 
-function getKVStore(): KVStore {
-  if (!kvStoreInstance) {
-    kvStoreInstance = new KVStore()
+function getRedisStore(): RedisStore {
+  if (!redisStoreInstance) {
+    redisStoreInstance = new RedisStore()
     if (!storeInitLogged) {
-      console.log("[ChatStore] Initialized Vercel KV store")
+      console.log("[ChatStore] Initialized Redis store")
       storeInitLogged = true
     }
   }
-  return kvStoreInstance
+  return redisStoreInstance
 }
 
 /**
@@ -447,8 +472,8 @@ function getKVStore(): KVStore {
  * by the index.ts wrapper. This allows the stores to be used directly in tests.
  */
 export function getChatStore(): ChatStore {
-  if (isKvAvailable()) {
-    return getKVStore()
+  if (isRedisConfigured()) {
+    return getRedisStore()
   }
   if (isDevelopment()) {
     return getMemoryStore()
@@ -456,17 +481,15 @@ export function getChatStore(): ChatStore {
   // This shouldn't happen if called through index.ts, but provide a fallback
   console.warn(
     "[ChatStore] WARNING: Using in-memory store in production. " +
-      "Configure KV_REST_API_URL + KV_REST_API_TOKEN for durable storage."
+      "Configure Redis env vars (KV_REST_API_URL/TOKEN or UPSTASH_REDIS_REST_URL/TOKEN) for durable storage."
   )
   return getMemoryStore()
 }
 
 /**
- * Get the storage type currently in use
+ * Get the storage mode currently in use
  */
-export function getStorageType(): "kv" | "memory" {
-  return isKvAvailable() ? "kv" : "memory"
-}
+export { getStorageMode }
 
 /**
  * Export a default store instance
