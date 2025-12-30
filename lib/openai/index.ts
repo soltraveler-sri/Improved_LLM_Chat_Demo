@@ -30,6 +30,7 @@ export {
 
   // Configuration
   getModel,
+  getChainedChatModel,
   getReasoningEffort,
   getTextVerbosity,
   getConfigInfo,

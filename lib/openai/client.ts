@@ -27,13 +27,19 @@ import { zodTextFormat } from "openai/helpers/zod"
  * Each kind has appropriate model, reasoning effort, and verbosity defaults.
  */
 export type RequestKind =
-  | "chat_fast" // Fast chat responses (gpt-5-nano, reasoning: low)
-  | "chat_deep" // Deep chat responses (gpt-5-mini, reasoning: medium)
+  | "chat_fast" // Fast chat responses (reasoning: low)
+  | "chat_deep" // Deep chat responses (reasoning: medium)
   | "summarize" // Summarization tasks (gpt-5-nano, reasoning: low)
   | "intent" // Intent classification (gpt-5-nano, reasoning: low)
   | "stacks" // Smart Stacks categorization (gpt-5-nano, reasoning: low)
   | "finder" // Chat finder reranking (gpt-5-mini, reasoning: low)
   | "codex" // Codex tasks (gpt-5.1-codex-mini, reasoning: medium)
+
+/**
+ * Request kinds that use previous_response_id chaining.
+ * These MUST use store: true and the same underlying model.
+ */
+const CHAINED_KINDS: Set<RequestKind> = new Set(["chat_fast", "chat_deep"])
 
 // =============================================================================
 // Configuration
@@ -41,10 +47,11 @@ export type RequestKind =
 
 /**
  * Default models for each request kind
+ * Note: chat_fast and chat_deep share the same model via getChainedChatModel()
  */
 const DEFAULT_MODELS: Record<RequestKind, string> = {
-  chat_fast: "gpt-5-nano",
-  chat_deep: "gpt-5-mini",
+  chat_fast: "gpt-5-mini", // Both chat kinds use the same model for chaining
+  chat_deep: "gpt-5-mini", // Both chat kinds use the same model for chaining
   summarize: "gpt-5-nano",
   intent: "gpt-5-nano",
   stacks: "gpt-5-nano",
@@ -63,6 +70,58 @@ const MODEL_ENV_VARS: Record<RequestKind, string> = {
   stacks: "OPENAI_MODEL_STACKS",
   finder: "OPENAI_MODEL_FINDER",
   codex: "OPENAI_MODEL_CODEX",
+}
+
+// Track if we've already warned about model mismatch (to avoid spamming logs)
+let chainedModelWarningLogged = false
+
+/**
+ * Get the unified model for chained chat requests.
+ *
+ * This ensures chat_fast and chat_deep use the SAME underlying model,
+ * which is required for previous_response_id chaining to work reliably.
+ *
+ * Priority:
+ * 1. OPENAI_MODEL_CHAT (explicit unified override)
+ * 2. OPENAI_MODEL_DEEP (prefer the "deep" model for quality)
+ * 3. OPENAI_MODEL_FAST (fallback)
+ * 4. Default: gpt-5-mini
+ */
+export function getChainedChatModel(): string {
+  // Priority 1: Explicit unified chat model
+  const chatModel = process.env.OPENAI_MODEL_CHAT
+  if (chatModel) {
+    return chatModel
+  }
+
+  const fastModel = process.env.OPENAI_MODEL_FAST
+  const deepModel = process.env.OPENAI_MODEL_DEEP
+
+  // If both are configured differently, warn and use deep model
+  if (fastModel && deepModel && fastModel !== deepModel) {
+    if (!chainedModelWarningLogged) {
+      console.warn(
+        `[OpenAI] Warning: OPENAI_MODEL_FAST (${fastModel}) != OPENAI_MODEL_DEEP (${deepModel}). ` +
+        `Using ${deepModel} for both to ensure previous_response_id chaining works. ` +
+        `Set OPENAI_MODEL_CHAT to explicitly configure the unified chat model.`
+      )
+      chainedModelWarningLogged = true
+    }
+    return deepModel
+  }
+
+  // Priority 2: Deep model
+  if (deepModel) {
+    return deepModel
+  }
+
+  // Priority 3: Fast model
+  if (fastModel) {
+    return fastModel
+  }
+
+  // Default
+  return DEFAULT_MODELS.chat_deep
 }
 
 /**
@@ -124,8 +183,16 @@ export function getOpenAIClient(): OpenAI {
 
 /**
  * Get the model for a request kind
+ *
+ * For chained kinds (chat_fast, chat_deep), this returns the unified
+ * chat model to ensure previous_response_id chaining works correctly.
  */
 export function getModel(kind: RequestKind): string {
+  // Chained kinds must use the same model
+  if (CHAINED_KINDS.has(kind)) {
+    return getChainedChatModel()
+  }
+
   const envVar = MODEL_ENV_VARS[kind]
   return process.env[envVar] || DEFAULT_MODELS[kind]
 }
@@ -176,6 +243,7 @@ type NonStreamingResponseParams = OpenAI.Responses.ResponseCreateParamsNonStream
  * - Reasoning effort is always "low" or higher (never "none")
  * - Text verbosity is set appropriately
  * - No unsupported parameters are sent
+ * - Chained kinds (chat_fast, chat_deep) use store: true for previous_response_id
  */
 function buildCommonParams(
   kind: RequestKind,
@@ -189,10 +257,15 @@ function buildCommonParams(
   const reasoning = getReasoningEffort(kind)
   const verbosity = getTextVerbosity(kind)
 
+  // Chained kinds MUST use store: true for previous_response_id to work.
+  // This applies to EVERY turn of the chain, including the first turn,
+  // otherwise the next turn cannot reference this response ID.
+  const shouldStore = CHAINED_KINDS.has(kind)
+
   const params: NonStreamingResponseParams = {
     model,
     input,
-    store: false,
+    store: shouldStore,
     stream: false,
     reasoning: { effort: reasoning },
     text: {
