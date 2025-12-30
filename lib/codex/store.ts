@@ -1,12 +1,13 @@
 /**
  * Codex Store - persistence for tasks and workspace snapshots
  *
- * Uses the same KV + memory fallback pattern as the chat store.
+ * Uses the same Redis + memory fallback pattern as the chat store.
+ * Supports both Vercel KV and Upstash Redis env var patterns.
  */
 
-import { kv } from "@vercel/kv"
 import type { CodexTask, WorkspaceSnapshot } from "./types"
 import { DEFAULT_WORKSPACE_FILES } from "./types"
+import { getRedisClient, isRedisConfigured, getStorageMode } from "../store/redis-client"
 
 /**
  * TTL for KV keys (7 days in seconds)
@@ -30,13 +31,6 @@ function workspaceKey(demoUid: string): string {
 }
 
 /**
- * Check if Vercel KV is available
- */
-function isKvAvailable(): boolean {
-  return !!(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN)
-}
-
-/**
  * Check if we're in development mode
  */
 function isDevelopment(): boolean {
@@ -47,7 +41,7 @@ function isDevelopment(): boolean {
  * Log store operations (one line per request)
  */
 function logOp(
-  storeType: "KV" | "Memory",
+  storeType: "Redis" | "Memory",
   operation: string,
   demoUid: string,
   extra?: string
@@ -117,56 +111,74 @@ class MemoryCodexStore {
 }
 
 /**
- * KV-backed store
+ * Redis-backed store
+ * Works with both Vercel KV and Upstash Redis env var patterns
  */
-class KVCodexStore {
+class RedisCodexStore {
   async getTask(demoUid: string, taskId: string): Promise<CodexTask | null> {
-    logOp("KV", "getTask", demoUid, `taskId=${taskId.slice(0, 8)}`)
+    logOp("Redis", "getTask", demoUid, `taskId=${taskId.slice(0, 8)}`)
+    const redis = getRedisClient()
+    if (!redis) return null
+    
     try {
-      return await kv.get<CodexTask>(taskKey(demoUid, taskId))
+      return await redis.get<CodexTask>(taskKey(demoUid, taskId))
     } catch (error) {
-      console.error("[KVCodexStore] getTask error:", error)
+      console.error("[RedisCodexStore] getTask error:", error)
       return null
     }
   }
 
   async saveTask(demoUid: string, task: CodexTask): Promise<void> {
-    logOp("KV", "saveTask", demoUid, `taskId=${task.id.slice(0, 8)}`)
+    logOp("Redis", "saveTask", demoUid, `taskId=${task.id.slice(0, 8)}`)
+    const redis = getRedisClient()
+    if (!redis) return
+    
     try {
       // Set task with TTL
-      await kv.set(taskKey(demoUid, task.id), task, { ex: KV_TTL_SECONDS })
+      await redis.set(taskKey(demoUid, task.id), task, { ex: KV_TTL_SECONDS })
       // Add to task list and refresh TTL
-      await kv.sadd(taskListKey(demoUid), task.id)
-      await kv.expire(taskListKey(demoUid), KV_TTL_SECONDS)
+      await redis.sadd(taskListKey(demoUid), task.id)
+      await redis.expire(taskListKey(demoUid), KV_TTL_SECONDS)
     } catch (error) {
-      console.error("[KVCodexStore] saveTask error:", error)
+      console.error("[RedisCodexStore] saveTask error:", error)
     }
   }
 
   async listTasks(demoUid: string): Promise<CodexTask[]> {
-    logOp("KV", "listTasks", demoUid)
+    logOp("Redis", "listTasks", demoUid)
+    const redis = getRedisClient()
+    if (!redis) return []
+    
     try {
-      const taskIds = await kv.smembers(taskListKey(demoUid))
+      const taskIds = await redis.smembers(taskListKey(demoUid))
       if (!taskIds || taskIds.length === 0) return []
 
       const tasks: CodexTask[] = []
       for (const id of taskIds) {
-        const task = await kv.get<CodexTask>(taskKey(demoUid, id as string))
+        const task = await redis.get<CodexTask>(taskKey(demoUid, id as string))
         if (task) tasks.push(task)
       }
 
       tasks.sort((a, b) => b.createdAt - a.createdAt)
       return tasks
     } catch (error) {
-      console.error("[KVCodexStore] listTasks error:", error)
+      console.error("[RedisCodexStore] listTasks error:", error)
       return []
     }
   }
 
   async getWorkspace(demoUid: string): Promise<WorkspaceSnapshot> {
-    logOp("KV", "getWorkspace", demoUid)
+    logOp("Redis", "getWorkspace", demoUid)
+    const redis = getRedisClient()
+    if (!redis) {
+      return {
+        files: { ...DEFAULT_WORKSPACE_FILES },
+        updatedAt: Date.now(),
+      }
+    }
+    
     try {
-      const existing = await kv.get<WorkspaceSnapshot>(workspaceKey(demoUid))
+      const existing = await redis.get<WorkspaceSnapshot>(workspaceKey(demoUid))
       if (existing) return existing
 
       // Create default workspace with TTL
@@ -174,10 +186,10 @@ class KVCodexStore {
         files: { ...DEFAULT_WORKSPACE_FILES },
         updatedAt: Date.now(),
       }
-      await kv.set(workspaceKey(demoUid), workspace, { ex: KV_TTL_SECONDS })
+      await redis.set(workspaceKey(demoUid), workspace, { ex: KV_TTL_SECONDS })
       return workspace
     } catch (error) {
-      console.error("[KVCodexStore] getWorkspace error:", error)
+      console.error("[RedisCodexStore] getWorkspace error:", error)
       return {
         files: { ...DEFAULT_WORKSPACE_FILES },
         updatedAt: Date.now(),
@@ -189,11 +201,14 @@ class KVCodexStore {
     demoUid: string,
     workspace: WorkspaceSnapshot
   ): Promise<void> {
-    logOp("KV", "saveWorkspace", demoUid)
+    logOp("Redis", "saveWorkspace", demoUid)
+    const redis = getRedisClient()
+    if (!redis) return
+    
     try {
-      await kv.set(workspaceKey(demoUid), workspace, { ex: KV_TTL_SECONDS })
+      await redis.set(workspaceKey(demoUid), workspace, { ex: KV_TTL_SECONDS })
     } catch (error) {
-      console.error("[KVCodexStore] saveWorkspace error:", error)
+      console.error("[RedisCodexStore] saveWorkspace error:", error)
     }
   }
 }
@@ -202,7 +217,7 @@ class KVCodexStore {
  * Singleton store instances (persists across requests)
  */
 let memoryStoreInstance: MemoryCodexStore | null = null
-let kvStoreInstance: KVCodexStore | null = null
+let redisStoreInstance: RedisCodexStore | null = null
 let storeInitLogged = false
 
 function getMemoryStore(): MemoryCodexStore {
@@ -216,15 +231,15 @@ function getMemoryStore(): MemoryCodexStore {
   return memoryStoreInstance
 }
 
-function getKVStore(): KVCodexStore {
-  if (!kvStoreInstance) {
-    kvStoreInstance = new KVCodexStore()
+function getRedisStore(): RedisCodexStore {
+  if (!redisStoreInstance) {
+    redisStoreInstance = new RedisCodexStore()
     if (!storeInitLogged) {
-      console.log("[CodexStore] Initialized Vercel KV store")
+      console.log("[CodexStore] Initialized Redis store")
       storeInitLogged = true
     }
   }
-  return kvStoreInstance
+  return redisStoreInstance
 }
 
 /**
@@ -245,8 +260,8 @@ export interface CodexStore {
  * by the index.ts wrapper. This allows the stores to be used directly in tests.
  */
 export function getCodexStore(): CodexStore {
-  if (isKvAvailable()) {
-    return getKVStore()
+  if (isRedisConfigured()) {
+    return getRedisStore()
   }
   if (isDevelopment()) {
     return getMemoryStore()
@@ -254,14 +269,12 @@ export function getCodexStore(): CodexStore {
   // This shouldn't happen if called through index.ts, but provide a fallback
   console.warn(
     "[CodexStore] WARNING: Using in-memory store in production. " +
-      "Configure KV_REST_API_URL + KV_REST_API_TOKEN for durable storage."
+      "Configure Redis env vars (KV_REST_API_URL/TOKEN or UPSTASH_REDIS_REST_URL/TOKEN) for durable storage."
   )
   return getMemoryStore()
 }
 
 /**
- * Get the storage type currently in use
+ * Get the storage mode currently in use
  */
-export function getStorageType(): "kv" | "memory" {
-  return isKvAvailable() ? "kv" : "memory"
-}
+export { getStorageMode }

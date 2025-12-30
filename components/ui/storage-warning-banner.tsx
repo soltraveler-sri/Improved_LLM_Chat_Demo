@@ -7,6 +7,8 @@ import { cn } from "@/lib/utils"
 interface StorageStatus {
   storageType: "kv" | "memory"
   kvConfigured: boolean
+  mode?: "redis" | "memory"
+  backend?: "upstash" | "vercel_kv" | "memory"
   warning?: string
 }
 
@@ -16,10 +18,10 @@ interface StorageWarningBannerProps {
 
 /**
  * A compact inline warning banner that shows when storage is running
- * in memory mode (without Vercel KV configured).
+ * in memory mode (without Redis configured).
  *
  * Fetches /api/storage on mount and shows a dismissible warning if
- * storageType !== "kv".
+ * mode !== "redis".
  */
 export function StorageWarningBanner({ className }: StorageWarningBannerProps) {
   const [status, setStatus] = useState<StorageStatus | null>(null)
@@ -48,8 +50,8 @@ export function StorageWarningBanner({ className }: StorageWarningBannerProps) {
     return null
   }
 
-  // Don't show if KV is configured
-  if (!status || status.storageType === "kv") {
+  // Don't show if Redis is configured (check both old and new fields for compatibility)
+  if (!status || status.mode === "redis" || status.storageType === "kv") {
     return null
   }
 
@@ -63,14 +65,14 @@ export function StorageWarningBanner({ className }: StorageWarningBannerProps) {
       <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
       <span className="flex-1 text-amber-700 dark:text-amber-300 text-xs">
         {status.warning ||
-          "Storage is running in demo memory mode. History may reset on refresh."}
+          "Storage is running in demo-local mode. History may reset on refresh."}
         <a
-          href="https://vercel.com/docs/storage/vercel-kv"
+          href="https://vercel.com/docs/storage/vercel-redis"
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex items-center gap-1 ml-1 underline underline-offset-2 hover:text-amber-600 dark:hover:text-amber-200"
         >
-          Configure Vercel KV
+          Configure Redis
           <ExternalLink className="h-3 w-3" />
         </a>
       </span>

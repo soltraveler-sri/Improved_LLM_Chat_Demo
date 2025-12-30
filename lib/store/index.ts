@@ -2,26 +2,44 @@
  * Unified store exports with resilient fallback behavior
  *
  * Store selection:
- * 1. If KV env vars are present → use KV store
+ * 1. If Redis env vars are present → use Redis store
  * 2. Else → use memory store (with warning in production)
  *
- * The app should never "brick" itself due to missing KV configuration.
+ * Supports both env var patterns:
+ * - KV_REST_API_URL + KV_REST_API_TOKEN (Vercel KV style)
+ * - UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN (Upstash official)
+ *
+ * The app should never "brick" itself due to missing configuration.
  * Instead, we fall back gracefully and expose status for UI warnings.
  */
 
 import type { ChatStore } from "./store"
 import type { CodexStore } from "../codex/store"
+import {
+  isRedisConfigured,
+  getStorageMode,
+  getStorageBackend,
+  getStorageDebugInfo,
+  type StorageMode,
+  type StorageBackend,
+} from "./redis-client"
 
 /**
- * Storage type indicator for UI
+ * Storage type indicator for UI (kept for backwards compatibility)
  */
 export type StorageType = "kv" | "memory"
 
 /**
- * Check if Vercel KV is available (env vars set)
+ * Check if Redis is available (any supported env vars set)
+ * Supports both Vercel KV and Upstash Redis patterns
+ */
+export { isRedisConfigured }
+
+/**
+ * Backwards compatible alias
  */
 export function isKvAvailable(): boolean {
-  return !!(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN)
+  return isRedisConfigured()
 }
 
 /**
@@ -33,9 +51,10 @@ export function isDevelopment(): boolean {
 
 /**
  * Get the current storage type for UI display
+ * Returns "kv" for backwards compatibility when Redis is configured
  */
 export function getStorageType(): StorageType {
-  return isKvAvailable() ? "kv" : "memory"
+  return isRedisConfigured() ? "kv" : "memory"
 }
 
 /**
@@ -44,26 +63,35 @@ export function getStorageType(): StorageType {
 export function getStorageInfo(): {
   storageType: StorageType
   kvConfigured: boolean
+  mode: StorageMode
+  backend: StorageBackend
+  detectedEnvKeys: string[]
   warning?: string
 } {
-  const storageType = getStorageType()
-  const kvConfigured = isKvAvailable()
+  const debugInfo = getStorageDebugInfo()
+  const storageType = debugInfo.configured ? "kv" : "memory"
 
-  if (kvConfigured) {
+  if (debugInfo.configured) {
     return {
       storageType,
-      kvConfigured,
+      kvConfigured: true,
+      mode: debugInfo.mode,
+      backend: debugInfo.backend,
+      detectedEnvKeys: debugInfo.detectedEnvKeys,
     }
   }
 
   // Memory store - include warning
   const warning = isDevelopment()
     ? "Using in-memory store (development mode). Data will reset on server restart."
-    : "Storage is running in demo memory mode. History may reset on refresh. Configure Vercel KV for reliable persistence."
+    : "Storage is running in demo-local mode. History may reset on refresh. Configure Redis for reliable persistence."
 
   return {
     storageType,
-    kvConfigured,
+    kvConfigured: false,
+    mode: debugInfo.mode,
+    backend: debugInfo.backend,
+    detectedEnvKeys: debugInfo.detectedEnvKeys,
     warning,
   }
 }
@@ -75,15 +103,19 @@ let memoryWarningLogged = false
  * Log a warning when using memory store in production (only once)
  */
 function warnIfMemoryInProduction(): void {
-  if (!isKvAvailable() && !isDevelopment() && !memoryWarningLogged) {
+  if (!isRedisConfigured() && !isDevelopment() && !memoryWarningLogged) {
     console.warn(
       "[Store] WARNING: Using in-memory store in production. " +
         "Data will not persist across requests/restarts. " +
-        "Configure KV_REST_API_URL + KV_REST_API_TOKEN for durable storage."
+        "Configure Redis env vars (KV_REST_API_URL/TOKEN or UPSTASH_REDIS_REST_URL/TOKEN) for durable storage."
     )
     memoryWarningLogged = true
   }
 }
+
+// Re-export storage mode helpers
+export { getStorageMode, getStorageBackend, getStorageDebugInfo }
+export type { StorageMode, StorageBackend }
 
 // Lazy imports to avoid circular dependencies
 let _chatStoreModule: typeof import("./store") | null = null
