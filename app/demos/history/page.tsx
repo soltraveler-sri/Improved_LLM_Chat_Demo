@@ -39,6 +39,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
 import { FinderView } from "@/components/history"
+import { StorageWarningBanner } from "@/components/ui/storage-warning-banner"
 import type {
   StoredChatCategory,
   StoredChatThreadMeta,
@@ -383,11 +384,15 @@ function HistoryDemoContent() {
   const recentCount = categoryCounts.recent || 0
 
   return (
-    <div className="flex h-full">
-      {/* Left sidebar - Mode toggle + Category stacks */}
-      <div className="w-64 border-r border-border flex flex-col">
-        {/* Header */}
-        <div className="p-4 border-b border-border">
+    <div className="flex h-full flex-col">
+      {/* Storage warning banner */}
+      <StorageWarningBanner className="m-2" />
+
+      <div className="flex flex-1 overflow-hidden">
+        {/* Left sidebar - Mode toggle + Category stacks */}
+        <div className="w-64 border-r border-border flex flex-col">
+          {/* Header */}
+          <div className="p-4 border-b border-border">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-lg font-semibold">
               <History className="h-5 w-5" />
@@ -868,6 +873,7 @@ function HistoryDemoContent() {
             </div>
           </>
         )}
+      </div>
       </div>
     </div>
   )

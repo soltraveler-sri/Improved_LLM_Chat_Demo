@@ -1,10 +1,12 @@
 /**
- * Unified store exports with proper selection rules
+ * Unified store exports with resilient fallback behavior
  *
  * Store selection:
  * 1. If KV env vars are present → use KV store
- * 2. Else if NODE_ENV === "development" → use memory store
- * 3. Else (production / Vercel) → throw error
+ * 2. Else → use memory store (with warning in production)
+ *
+ * The app should never "brick" itself due to missing KV configuration.
+ * Instead, we fall back gracefully and expose status for UI warnings.
  */
 
 import type { ChatStore } from "./store"
@@ -13,7 +15,7 @@ import type { CodexStore } from "../codex/store"
 /**
  * Storage type indicator for UI
  */
-export type StorageType = "kv" | "memory" | "error"
+export type StorageType = "kv" | "memory"
 
 /**
  * Check if Vercel KV is available (env vars set)
@@ -33,57 +35,53 @@ export function isDevelopment(): boolean {
  * Get the current storage type for UI display
  */
 export function getStorageType(): StorageType {
-  if (isKvAvailable()) {
-    return "kv"
-  }
-  if (isDevelopment()) {
-    return "memory"
-  }
-  return "error"
+  return isKvAvailable() ? "kv" : "memory"
 }
 
 /**
  * Get storage info for API responses
  */
 export function getStorageInfo(): {
-  type: StorageType
-  available: boolean
-  message: string
+  storageType: StorageType
+  kvConfigured: boolean
+  warning?: string
 } {
-  const type = getStorageType()
+  const storageType = getStorageType()
+  const kvConfigured = isKvAvailable()
 
-  switch (type) {
-    case "kv":
-      return {
-        type: "kv",
-        available: true,
-        message: "Using Vercel KV store",
-      }
-    case "memory":
-      return {
-        type: "memory",
-        available: true,
-        message: "Using in-memory store (development only)",
-      }
-    case "error":
-      return {
-        type: "error",
-        available: false,
-        message:
-          "KV not configured; demo history will be unreliable. Configure KV_REST_API_URL + KV_REST_API_TOKEN",
-      }
+  if (kvConfigured) {
+    return {
+      storageType,
+      kvConfigured,
+    }
+  }
+
+  // Memory store - include warning
+  const warning = isDevelopment()
+    ? "Using in-memory store (development mode). Data will reset on server restart."
+    : "Storage is running in demo memory mode. History may reset on refresh. Configure Vercel KV for reliable persistence."
+
+  return {
+    storageType,
+    kvConfigured,
+    warning,
   }
 }
 
+// Log once when memory store is used in production
+let memoryWarningLogged = false
+
 /**
- * Throw if KV is not configured in production
+ * Log a warning when using memory store in production (only once)
  */
-function assertStorageAvailable(): void {
-  if (!isKvAvailable() && !isDevelopment()) {
-    throw new Error(
-      "KV not configured; demo history will be unreliable. " +
-        "Configure KV_REST_API_URL + KV_REST_API_TOKEN environment variables."
+function warnIfMemoryInProduction(): void {
+  if (!isKvAvailable() && !isDevelopment() && !memoryWarningLogged) {
+    console.warn(
+      "[Store] WARNING: Using in-memory store in production. " +
+        "Data will not persist across requests/restarts. " +
+        "Configure KV_REST_API_URL + KV_REST_API_TOKEN for durable storage."
     )
+    memoryWarningLogged = true
   }
 }
 
@@ -107,20 +105,20 @@ async function getCodexStoreModule() {
 
 /**
  * Get the chat store instance
- * Throws in production if KV is not configured
+ * Falls back to memory store if KV is not configured (with warning in production)
  */
 export async function getChatStoreAsync(): Promise<ChatStore> {
-  assertStorageAvailable()
+  warnIfMemoryInProduction()
   const mod = await getChatStoreModule()
   return mod.getChatStore()
 }
 
 /**
  * Get the codex store instance
- * Throws in production if KV is not configured
+ * Falls back to memory store if KV is not configured (with warning in production)
  */
 export async function getCodexStoreAsync(): Promise<CodexStore> {
-  assertStorageAvailable()
+  warnIfMemoryInProduction()
   const mod = await getCodexStoreModule()
   return mod.getCodexStore()
 }
@@ -130,14 +128,14 @@ export async function getCodexStoreAsync(): Promise<CodexStore> {
  * These are kept for backwards compatibility but the async versions are preferred
  */
 export function getChatStore(): ChatStore {
-  assertStorageAvailable()
+  warnIfMemoryInProduction()
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const mod = require("./store") as typeof import("./store")
   return mod.getChatStore()
 }
 
 export function getCodexStore(): CodexStore {
-  assertStorageAvailable()
+  warnIfMemoryInProduction()
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const mod = require("../codex/store") as typeof import("../codex/store")
   return mod.getCodexStore()
