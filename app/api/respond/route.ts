@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
+import OpenAI from "openai"
 import {
   createTextResponse,
   extractTextOutput,
@@ -64,6 +65,29 @@ export async function POST(request: NextRequest) {
     })
   } catch (error) {
     console.error("API error:", error)
+
+    // Check for previous_response_not_found error - return 409 with recovery info
+    if (error instanceof OpenAI.APIError) {
+      // The error code can be in error.code or in the error message
+      const isPreviousResponseNotFound =
+        error.code === "previous_response_not_found" ||
+        error.message?.includes("previous_response_not_found")
+
+      if (isPreviousResponseNotFound) {
+        console.warn(
+          "[Respond] Chain broken: previous_response_id not found. " +
+          "Client should retry without previous_response_id."
+        )
+        return NextResponse.json(
+          {
+            code: "chain_broken",
+            message: "The conversation chain has expired or was not found.",
+            suggestion: "start_new_thread",
+          },
+          { status: 409 }
+        )
+      }
+    }
 
     const errorResponse = formatOpenAIError(error, kind)
     return NextResponse.json(errorResponse, { status: 500 })
