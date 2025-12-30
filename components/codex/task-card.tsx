@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import {
   ChevronDown,
   ChevronRight,
@@ -32,13 +32,24 @@ interface TaskCardProps {
   onRefresh: () => Promise<void>
 }
 
-// Progress stages for running state
+// Progress stages for running state with status pills
 const PROGRESS_STAGES = [
-  { text: "Planning...", duration: 1500 },
-  { text: "Analyzing workspace...", duration: 2000 },
-  { text: "Drafting changes...", duration: 3000 },
-  { text: "Formatting diff...", duration: 1500 },
-  { text: "Almost there...", duration: 2000 },
+  { status: "Queued", text: "Initializing task...", duration: 800 },
+  { status: "Planning", text: "Analyzing your request...", duration: 1500 },
+  { status: "Planning", text: "Reading workspace files...", duration: 2000 },
+  { status: "Generating", text: "Drafting code changes...", duration: 3000 },
+  { status: "Generating", text: "Writing file contents...", duration: 2500 },
+  { status: "Generating", text: "Formatting output...", duration: 1500 },
+]
+
+// Animated log messages to show while processing
+const ANIMATED_LOGS = [
+  "Parsing prompt structure...",
+  "Identifying target files...",
+  "Generating implementation plan...",
+  "Writing new code blocks...",
+  "Validating syntax...",
+  "Finalizing changes...",
 ]
 
 // =============================================================================
@@ -338,7 +349,18 @@ function ProgressView({
   onRefresh: () => Promise<void>
 }) {
   const [stageIndex, setStageIndex] = useState(0)
+  const [logIndex, setLogIndex] = useState(0)
+  const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [isRefreshing, setIsRefreshing] = useState(false)
+  const startTimeRef = useRef(Date.now())
+
+  // Heartbeat timer - update every second
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - startTimeRef.current) / 1000))
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [])
 
   // Cycle through progress stages
   useEffect(() => {
@@ -354,6 +376,14 @@ function ProgressView({
     return () => clearTimeout(timer)
   }, [stageIndex])
 
+  // Cycle through animated log messages
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setLogIndex((prev) => (prev + 1) % ANIMATED_LOGS.length)
+    }, 1800)
+    return () => clearInterval(timer)
+  }, [])
+
   // Auto-refresh periodically
   useEffect(() => {
     const interval = setInterval(() => {
@@ -367,50 +397,91 @@ function ProgressView({
   const currentStage = PROGRESS_STAGES[stageIndex] || PROGRESS_STAGES[PROGRESS_STAGES.length - 1]
   const progress = ((stageIndex + 1) / PROGRESS_STAGES.length) * 100
 
+  // Get visible animated logs (show 4 most recent)
+  const visibleLogs = Array.from({ length: 4 }, (_, i) => {
+    const idx = (logIndex - i + ANIMATED_LOGS.length) % ANIMATED_LOGS.length
+    return { text: ANIMATED_LOGS[idx], opacity: 1 - i * 0.25 }
+  }).reverse()
+
   return (
-    <div className="h-full flex flex-col items-center justify-center p-8">
-      <div className="w-full max-w-md space-y-6">
-        {/* Spinner and text */}
-        <div className="text-center space-y-3">
-          <div className="relative">
-            <Loader2 className="h-12 w-12 animate-spin text-blue-500 mx-auto" />
-            {isRefreshing && (
-              <div className="absolute -top-1 -right-1 h-3 w-3 bg-blue-500 rounded-full animate-pulse" />
+    <div className="h-full flex flex-col p-6">
+      {/* Header with status pill and timer */}
+      <div className="flex items-center justify-between mb-6">
+        <div className="flex items-center gap-3">
+          <span
+            className={cn(
+              "text-xs font-medium px-2.5 py-1 rounded-full transition-all duration-300",
+              currentStage.status === "Queued" && "bg-muted text-muted-foreground",
+              currentStage.status === "Planning" && "bg-blue-500/20 text-blue-600 dark:text-blue-400",
+              currentStage.status === "Generating" && "bg-purple-500/20 text-purple-600 dark:text-purple-400"
             )}
+          >
+            {currentStage.status}
+          </span>
+          {isRefreshing && (
+            <div className="h-2 w-2 bg-blue-500 rounded-full animate-pulse" />
+          )}
+        </div>
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <span className="animate-pulse">●</span>
+          <span>Working… {elapsedSeconds}s</span>
+        </div>
+      </div>
+
+      {/* Main content area */}
+      <div className="flex-1 flex flex-col justify-center max-w-md mx-auto w-full space-y-6">
+        {/* Spinner and current action */}
+        <div className="text-center space-y-3">
+          <div className="relative inline-block">
+            <Loader2 className="h-10 w-10 animate-spin text-blue-500" />
           </div>
           <p className="text-sm font-medium text-foreground">{currentStage.text}</p>
-          <p className="text-xs text-muted-foreground">
-            This usually takes 5-15 seconds
-          </p>
         </div>
 
         {/* Progress bar */}
         <div className="space-y-2">
-          <div className="h-2 bg-muted rounded-full overflow-hidden">
+          <div className="h-1.5 bg-muted rounded-full overflow-hidden">
             <div
-              className="h-full bg-gradient-to-r from-blue-500 to-blue-400 rounded-full transition-all duration-500 ease-out"
-              style={{ width: `${progress}%` }}
+              className="h-full bg-gradient-to-r from-blue-500 via-purple-500 to-blue-400 rounded-full transition-all duration-700 ease-out animate-pulse"
+              style={{ width: `${Math.min(progress, 95)}%` }}
             />
           </div>
           <div className="flex justify-between text-[10px] text-muted-foreground">
-            <span>Generating code...</span>
-            <span>{Math.round(progress)}%</span>
+            <span>{currentStage.status === "Generating" ? "Generating changes..." : "Preparing..."}</span>
+            <span>{Math.round(Math.min(progress, 95))}%</span>
           </div>
         </div>
+      </div>
 
-        {/* Log preview */}
-        {task.logs.length > 0 && (
-          <div className="bg-muted/50 rounded-lg p-3 max-h-[120px] overflow-auto">
-            <div className="space-y-1 font-mono text-[11px]">
-              {task.logs.slice(-5).map((log, idx) => (
-                <div key={idx} className="text-muted-foreground">
-                  <span className="text-muted-foreground/50 mr-2">•</span>
-                  {log}
-                </div>
-              ))}
+      {/* Animated log output - fixed at bottom */}
+      <div className="mt-auto pt-4">
+        <ScrollArea className="h-[100px] bg-muted/30 rounded-lg border border-border/50">
+          <div className="p-3 space-y-1.5 font-mono text-[11px]">
+            {/* Real logs if any */}
+            {task.logs.length > 0 && task.logs.slice(-2).map((log, idx) => (
+              <div key={`real-${idx}`} className="text-foreground/70 flex items-start gap-2">
+                <Check className="h-3 w-3 text-green-500 shrink-0 mt-0.5" />
+                <span>{log}</span>
+              </div>
+            ))}
+            {/* Animated skeleton logs */}
+            {visibleLogs.map((log, idx) => (
+              <div
+                key={`anim-${idx}`}
+                className="text-muted-foreground flex items-start gap-2 transition-opacity duration-300"
+                style={{ opacity: log.opacity }}
+              >
+                <span className="text-blue-400 shrink-0">→</span>
+                <span>{log.text}</span>
+              </div>
+            ))}
+            {/* Skeleton blocks */}
+            <div className="space-y-1.5 pt-1">
+              <div className="h-3 w-3/4 bg-muted rounded animate-pulse" />
+              <div className="h-3 w-1/2 bg-muted rounded animate-pulse" style={{ animationDelay: "150ms" }} />
             </div>
           </div>
-        )}
+        </ScrollArea>
       </div>
     </div>
   )

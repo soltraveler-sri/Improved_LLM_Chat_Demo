@@ -169,7 +169,32 @@ export default function CodexDemoPage() {
         // Handle @codex command
         const prompt = extractCodexPrompt(text)
 
-        // Create task via API
+        // Create placeholder task immediately for instant UI feedback
+        const placeholderId = `placeholder_${generateId()}`
+        const placeholderTask: CodexTask = {
+          id: placeholderId,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          prompt,
+          title: "",
+          status: "queued",
+          planMarkdown: "",
+          changes: [],
+          logs: [],
+          diffUnified: "",
+        }
+
+        // Store placeholder task and add task card message immediately
+        setTasks((prev) => ({ ...prev, [placeholderId]: placeholderTask }))
+        const taskMessage: ChatMessage = {
+          id: generateId(),
+          type: "task",
+          taskId: placeholderId,
+          createdAt: Date.now(),
+        }
+        setMessages((prev) => [...prev, taskMessage])
+
+        // Now make the API call
         const res = await fetch("/api/codex/tasks", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -179,27 +204,36 @@ export default function CodexDemoPage() {
         const data = await res.json()
 
         if (!res.ok) {
+          // Update placeholder with error
+          setTasks((prev) => ({
+            ...prev,
+            [placeholderId]: {
+              ...placeholderTask,
+              status: "failed",
+              error: data.error || "Failed to create task",
+              logs: ["Error: " + (data.error || "Failed to create task")],
+            },
+          }))
           throw new Error(data.error || "Failed to create task")
         }
 
         const task = data.task as CodexTask
 
-        // Store task
-        setTasks((prev) => ({ ...prev, [task.id]: task }))
+        // Replace placeholder with real task
+        setTasks((prev) => {
+          const { [placeholderId]: _, ...rest } = prev
+          return { ...rest, [task.id]: task }
+        })
 
-        // Add task card message
-        const taskMessage: ChatMessage = {
-          id: generateId(),
-          type: "task",
-          taskId: task.id,
-          createdAt: Date.now(),
-        }
-        setMessages((prev) => [...prev, taskMessage])
+        // Update message to reference real task ID
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.taskId === placeholderId ? { ...msg, taskId: task.id } : msg
+          )
+        )
 
         // Poll for completion if still running
         if (task.status === "running" || task.status === "queued") {
-          // The task is created synchronously and waits for completion
-          // so we just refresh once
           await refreshTask(task.id)
         }
       } else {
