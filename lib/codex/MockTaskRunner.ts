@@ -74,12 +74,25 @@ ${userPrompt}
 
 ## Instructions
 
-1. Generate a short, descriptive title for this task
+1. Generate a short, descriptive title for this task (max 60 chars)
 2. Create a step-by-step plan in markdown explaining what you'll do
 3. Generate the file changes needed (provide complete new file contents for each changed file)
 4. Create log messages that would appear during execution
 
-Be concise but thorough. Only modify files that need changes.
+## Important Guidelines for File Generation
+
+When the user requests building, adding, or implementing a feature:
+- Generate **3 to 6 files** to demonstrate a realistic implementation
+- Include a mix of file types appropriate to the request, such as:
+  - Source files (e.g., .ts, .tsx, .js files in src/)
+  - Type definitions or interfaces when relevant
+  - Configuration or utility files if needed
+  - Update README.md only if documentation changes are relevant
+- Keep individual file changes concise and demo-friendly (under 50 lines per file is ideal)
+- Prefer creating new files over modifying existing ones for new features
+- Use realistic file paths that fit the project structure (e.g., src/components/, src/utils/, src/routes/)
+
+Do NOT only modify README.md - that's rarely a complete implementation.
 Return a JSON object with: title, planMarkdown, changes, logs`
 }
 
