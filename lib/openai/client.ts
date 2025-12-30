@@ -132,7 +132,7 @@ export function getChainedChatModel(): string {
  */
 const REASONING_EFFORT: Record<RequestKind, "low" | "medium" | "high"> = {
   chat_fast: "low",
-  chat_deep: "medium",
+  chat_deep: "high",
   summarize: "low",
   intent: "low",
   stacks: "low",
