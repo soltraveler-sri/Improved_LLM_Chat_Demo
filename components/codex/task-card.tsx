@@ -32,16 +32,6 @@ interface TaskCardProps {
   onRefresh: () => Promise<void>
 }
 
-// Progress stages for running state with status pills
-const PROGRESS_STAGES = [
-  { status: "Queued", text: "Initializing task...", duration: 800 },
-  { status: "Planning", text: "Analyzing your request...", duration: 1500 },
-  { status: "Planning", text: "Reading workspace files...", duration: 2000 },
-  { status: "Generating", text: "Drafting code changes...", duration: 3000 },
-  { status: "Generating", text: "Writing file contents...", duration: 2500 },
-  { status: "Generating", text: "Formatting output...", duration: 1500 },
-]
-
 // Animated log messages to show while processing
 const ANIMATED_LOGS = [
   "Parsing prompt structure...",
@@ -338,6 +328,101 @@ export function TaskCard({
 }
 
 // =============================================================================
+// Progress Pacing Configuration
+// =============================================================================
+
+/**
+ * Time-based progress pacing for realistic ~30s experience
+ * 
+ * Progress curve:
+ * - 0-60% in ~10-12 seconds (fast initial progress)
+ * - 60-92% in ~18-22 seconds (slowing down)
+ * - 92-96% cap until task completes (never looks "done" too early)
+ * - On task completion: accelerate to 100% in 400-800ms
+ */
+const PROGRESS_CONFIG = {
+  // Target time to reach each milestone (in seconds)
+  PHASE_1_TARGET_PERCENT: 60,
+  PHASE_1_DURATION_MS: 11000, // 11 seconds to reach 60%
+  
+  PHASE_2_TARGET_PERCENT: 92,
+  PHASE_2_DURATION_MS: 20000, // 20 more seconds to reach 92% (total: 31s)
+  
+  // Cap - progress stalls here until task completes
+  MAX_PROGRESS_WHILE_RUNNING: 96,
+  
+  // Final animation when task completes
+  COMPLETION_ANIMATION_MS: 500,
+}
+
+/**
+ * Calculate progress percentage based on elapsed time
+ * Uses easing curves to feel natural
+ */
+function calculateTimeBasedProgress(elapsedMs: number, isComplete: boolean): number {
+  if (isComplete) {
+    return 100
+  }
+
+  const { 
+    PHASE_1_TARGET_PERCENT, 
+    PHASE_1_DURATION_MS,
+    PHASE_2_TARGET_PERCENT,
+    PHASE_2_DURATION_MS,
+    MAX_PROGRESS_WHILE_RUNNING,
+  } = PROGRESS_CONFIG
+
+  // Phase 1: 0 → 60% over ~11 seconds
+  if (elapsedMs < PHASE_1_DURATION_MS) {
+    const t = elapsedMs / PHASE_1_DURATION_MS
+    // Ease-out curve: fast start, slowing down
+    const eased = 1 - Math.pow(1 - t, 2)
+    return eased * PHASE_1_TARGET_PERCENT
+  }
+
+  // Phase 2: 60% → 92% over ~20 more seconds
+  const phase2Elapsed = elapsedMs - PHASE_1_DURATION_MS
+  if (phase2Elapsed < PHASE_2_DURATION_MS) {
+    const t = phase2Elapsed / PHASE_2_DURATION_MS
+    // Slower ease-out for this phase
+    const eased = 1 - Math.pow(1 - t, 3)
+    const phase2Progress = eased * (PHASE_2_TARGET_PERCENT - PHASE_1_TARGET_PERCENT)
+    return PHASE_1_TARGET_PERCENT + phase2Progress
+  }
+
+  // Phase 3: Creep slowly from 92% to 96% cap
+  const phase3Elapsed = elapsedMs - PHASE_1_DURATION_MS - PHASE_2_DURATION_MS
+  // Very slow creep: takes 30 more seconds to go from 92% to 96%
+  const creepRate = 4 / 30000 // 4% over 30 seconds
+  const creepProgress = Math.min(phase3Elapsed * creepRate, MAX_PROGRESS_WHILE_RUNNING - PHASE_2_TARGET_PERCENT)
+  
+  return Math.min(PHASE_2_TARGET_PERCENT + creepProgress, MAX_PROGRESS_WHILE_RUNNING)
+}
+
+/**
+ * Get the current status label based on progress
+ */
+function getProgressStatus(progress: number): string {
+  if (progress < 15) return "Queued"
+  if (progress < 40) return "Planning"
+  if (progress < 100) return "Generating"
+  return "Complete"
+}
+
+/**
+ * Get the current status text based on progress
+ */
+function getProgressText(progress: number): string {
+  if (progress < 10) return "Initializing task..."
+  if (progress < 25) return "Analyzing your request..."
+  if (progress < 40) return "Reading workspace files..."
+  if (progress < 60) return "Drafting code changes..."
+  if (progress < 80) return "Writing file contents..."
+  if (progress < 95) return "Formatting output..."
+  return "Finalizing..."
+}
+
+// =============================================================================
 // Progress View Component (Running State)
 // =============================================================================
 
@@ -348,33 +433,47 @@ function ProgressView({
   task: CodexTask
   onRefresh: () => Promise<void>
 }) {
-  const [stageIndex, setStageIndex] = useState(0)
   const [logIndex, setLogIndex] = useState(0)
-  const [elapsedSeconds, setElapsedSeconds] = useState(0)
+  const [elapsedMs, setElapsedMs] = useState(0)
   const [isRefreshing, setIsRefreshing] = useState(false)
-  const startTimeRef = useRef(Date.now())
+  const startTimeRef = useRef<number | null>(null)
+  const animationFrameRef = useRef<number | null>(null)
 
-  // Heartbeat timer - update every second
+  // Initialize start time on mount
   useEffect(() => {
-    const timer = setInterval(() => {
-      setElapsedSeconds(Math.floor((Date.now() - startTimeRef.current) / 1000))
-    }, 1000)
-    return () => clearInterval(timer)
+    startTimeRef.current = Date.now()
+    return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current)
+      }
+    }
   }, [])
 
-  // Cycle through progress stages
+  // Smooth progress updates using requestAnimationFrame
   useEffect(() => {
-    const stage = PROGRESS_STAGES[stageIndex]
-    if (!stage) return
-
-    const timer = setTimeout(() => {
-      setStageIndex((prev) =>
-        prev < PROGRESS_STAGES.length - 1 ? prev + 1 : prev
-      )
-    }, stage.duration)
-
-    return () => clearTimeout(timer)
-  }, [stageIndex])
+    let lastUpdate = Date.now()
+    
+    const updateProgress = () => {
+      if (startTimeRef.current === null) return
+      
+      const now = Date.now()
+      // Throttle updates to ~60fps for smooth animation
+      if (now - lastUpdate >= 16) {
+        setElapsedMs(now - startTimeRef.current)
+        lastUpdate = now
+      }
+      
+      animationFrameRef.current = requestAnimationFrame(updateProgress)
+    }
+    
+    animationFrameRef.current = requestAnimationFrame(updateProgress)
+    
+    return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current)
+      }
+    }
+  }, [])
 
   // Cycle through animated log messages
   useEffect(() => {
@@ -394,8 +493,11 @@ function ProgressView({
     return () => clearInterval(interval)
   }, [onRefresh])
 
-  const currentStage = PROGRESS_STAGES[stageIndex] || PROGRESS_STAGES[PROGRESS_STAGES.length - 1]
-  const progress = ((stageIndex + 1) / PROGRESS_STAGES.length) * 100
+  // Calculate time-based progress (never completes since component unmounts when task finishes)
+  const progress = calculateTimeBasedProgress(elapsedMs, false)
+  const elapsedSeconds = Math.floor(elapsedMs / 1000)
+  const currentStatus = getProgressStatus(progress)
+  const currentText = getProgressText(progress)
 
   // Get visible animated logs (show 4 most recent)
   const visibleLogs = Array.from({ length: 4 }, (_, i) => {
@@ -411,12 +513,12 @@ function ProgressView({
           <span
             className={cn(
               "text-xs font-medium px-2.5 py-1 rounded-full transition-all duration-300",
-              currentStage.status === "Queued" && "bg-muted text-muted-foreground",
-              currentStage.status === "Planning" && "bg-blue-500/20 text-blue-600 dark:text-blue-400",
-              currentStage.status === "Generating" && "bg-purple-500/20 text-purple-600 dark:text-purple-400"
+              currentStatus === "Queued" && "bg-muted text-muted-foreground",
+              currentStatus === "Planning" && "bg-blue-500/20 text-blue-600 dark:text-blue-400",
+              currentStatus === "Generating" && "bg-purple-500/20 text-purple-600 dark:text-purple-400"
             )}
           >
-            {currentStage.status}
+            {currentStatus}
           </span>
           {isRefreshing && (
             <div className="h-2 w-2 bg-blue-500 rounded-full animate-pulse" />
@@ -435,20 +537,20 @@ function ProgressView({
           <div className="relative inline-block">
             <Loader2 className="h-10 w-10 animate-spin text-blue-500" />
           </div>
-          <p className="text-sm font-medium text-foreground">{currentStage.text}</p>
+          <p className="text-sm font-medium text-foreground">{currentText}</p>
         </div>
 
         {/* Progress bar */}
         <div className="space-y-2">
           <div className="h-1.5 bg-muted rounded-full overflow-hidden">
             <div
-              className="h-full bg-gradient-to-r from-blue-500 via-purple-500 to-blue-400 rounded-full transition-all duration-700 ease-out animate-pulse"
-              style={{ width: `${Math.min(progress, 95)}%` }}
+              className="h-full bg-gradient-to-r from-blue-500 via-purple-500 to-blue-400 rounded-full transition-all duration-150 ease-out"
+              style={{ width: `${Math.round(progress)}%` }}
             />
           </div>
           <div className="flex justify-between text-[10px] text-muted-foreground">
-            <span>{currentStage.status === "Generating" ? "Generating changes..." : "Preparing..."}</span>
-            <span>{Math.round(Math.min(progress, 95))}%</span>
+            <span>{currentStatus === "Generating" ? "Generating changes..." : "Preparing..."}</span>
+            <span>{Math.round(progress)}%</span>
           </div>
         </div>
       </div>

@@ -10,7 +10,7 @@
 
 import { z } from "zod"
 import type { TaskRunner, StartTaskArgs } from "./TaskRunner"
-import type { CodexTask, WorkspaceSnapshot, CodexFileChange } from "./types"
+import type { CodexTask, WorkspaceSnapshot, CodexFileChange, CodexTaskContextSummary } from "./types"
 import { getCodexStore } from "@/lib/store"
 import { createParsedResponse, getConfigInfo } from "@/lib/openai"
 
@@ -81,19 +81,123 @@ ${userPrompt}
 
 ## Important Guidelines for File Generation
 
+**CRITICAL**: Always generate actual code files, not just documentation!
+
 When the user requests building, adding, or implementing a feature:
-- Generate **3 to 6 files** to demonstrate a realistic implementation
-- Include a mix of file types appropriate to the request, such as:
+- Generate **3 to 6 files** minimum to demonstrate a realistic implementation
+- **MUST include at least 2-3 actual code files** (.ts, .tsx, .js, .jsx, .css, .html, etc.)
+- Include a mix of file types appropriate to the request:
   - Source files (e.g., .ts, .tsx, .js files in src/)
-  - Type definitions or interfaces when relevant
-  - Configuration or utility files if needed
-  - Update README.md only if documentation changes are relevant
+  - Type definitions or interfaces when relevant (.ts files with types/interfaces)
+  - Styles if UI-related (.css, .scss)
+  - Configuration files if needed
+  - Update README.md ONLY as a supplementary file, never as the main output
 - Keep individual file changes concise and demo-friendly (under 50 lines per file is ideal)
 - Prefer creating new files over modifying existing ones for new features
-- Use realistic file paths that fit the project structure (e.g., src/components/, src/utils/, src/routes/)
+- Use realistic file paths that fit the project structure (e.g., src/components/, src/utils/, src/routes/, src/api/)
 
-Do NOT only modify README.md - that's rarely a complete implementation.
+**FORBIDDEN**: Returning only README.md or only documentation files. Always include implementation code.
+
+Example for "add a health check endpoint":
+- src/routes/health.ts (main implementation)
+- src/types/health.ts (type definitions)
+- src/utils/health-checks.ts (utility functions)
+- src/tests/health.test.ts (optional: test file)
+
 Return a JSON object with: title, planMarkdown, changes, logs`
+}
+
+/**
+ * Infer programming language from file extension
+ */
+function inferLanguageFromPath(path: string): string | null {
+  const ext = path.split('.').pop()?.toLowerCase()
+  const languageMap: Record<string, string> = {
+    'ts': 'TypeScript',
+    'tsx': 'TypeScript (React)',
+    'js': 'JavaScript',
+    'jsx': 'JavaScript (React)',
+    'css': 'CSS',
+    'scss': 'SCSS',
+    'html': 'HTML',
+    'json': 'JSON',
+    'md': 'Markdown',
+    'py': 'Python',
+    'go': 'Go',
+    'rs': 'Rust',
+    'java': 'Java',
+    'rb': 'Ruby',
+    'php': 'PHP',
+    'sql': 'SQL',
+    'yaml': 'YAML',
+    'yml': 'YAML',
+    'sh': 'Shell',
+    'bash': 'Bash',
+  }
+  return ext ? languageMap[ext] || null : null
+}
+
+/**
+ * Generate a compact context summary from completed task
+ * Used for injecting context into follow-up chat messages
+ */
+function generateContextSummary(
+  title: string,
+  changes: CodexFileChange[],
+  planMarkdown: string
+): CodexTaskContextSummary {
+  // Extract file paths
+  const filePaths = changes.map(c => c.path)
+  
+  // Infer languages from file extensions (deduplicated)
+  const languagesSet = new Set<string>()
+  for (const path of filePaths) {
+    const lang = inferLanguageFromPath(path)
+    if (lang) languagesSet.add(lang)
+  }
+  const languages = Array.from(languagesSet)
+  
+  // Generate bullet summary from plan markdown
+  // Extract key points, limiting to 3-6 bullets
+  const bullets: string[] = []
+  
+  // Try to extract bullets from the plan
+  const lines = planMarkdown.split('\n')
+  for (const line of lines) {
+    const trimmed = line.trim()
+    // Look for bullet points or numbered items
+    if (trimmed.startsWith('- ') || trimmed.startsWith('* ') || /^\d+\.\s/.test(trimmed)) {
+      const text = trimmed.replace(/^[-*]\s+/, '').replace(/^\d+\.\s+/, '')
+      if (text.length > 10 && text.length < 150) {
+        bullets.push(text)
+        if (bullets.length >= 6) break
+      }
+    }
+  }
+  
+  // If we didn't get enough bullets from the plan, generate basic ones
+  if (bullets.length < 3) {
+    // Add file-based bullets
+    const newFiles = changes.filter(c => !c.before).map(c => c.path)
+    const modifiedFiles = changes.filter(c => c.before).map(c => c.path)
+    
+    if (newFiles.length > 0) {
+      bullets.push(`Created ${newFiles.length} new file${newFiles.length > 1 ? 's' : ''}: ${newFiles.slice(0, 3).join(', ')}${newFiles.length > 3 ? '...' : ''}`)
+    }
+    if (modifiedFiles.length > 0) {
+      bullets.push(`Modified ${modifiedFiles.length} existing file${modifiedFiles.length > 1 ? 's' : ''}`)
+    }
+    if (languages.length > 0) {
+      bullets.push(`Primary language${languages.length > 1 ? 's' : ''}: ${languages.slice(0, 3).join(', ')}`)
+    }
+  }
+  
+  return {
+    title,
+    filePaths,
+    languages,
+    bullets: bullets.slice(0, 6), // Max 6 bullets
+  }
 }
 
 /**
@@ -201,6 +305,13 @@ export class MockTaskRunner implements TaskRunner {
 
       // Generate unified diff
       const diffUnified = generateUnifiedDiff(changesWithBefore, workspace)
+      
+      // Generate compact context summary for chat follow-ups
+      const contextSummary = generateContextSummary(
+        parsed.title,
+        changesWithBefore,
+        parsed.planMarkdown
+      )
 
       // Update task with results
       const updatedTask: CodexTask = {
@@ -211,6 +322,7 @@ export class MockTaskRunner implements TaskRunner {
         planMarkdown: parsed.planMarkdown,
         changes: changesWithBefore,
         diffUnified,
+        contextSummary,
         logs: [
           ...task.logs,
           "Generating plan...",
