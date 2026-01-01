@@ -1,15 +1,21 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback, KeyboardEvent } from "react"
-import { useRouter, useSearchParams } from "next/navigation"
-import { Send, Loader2, Search, MessageSquare, Sparkles } from "lucide-react"
+import {
+  Send,
+  Loader2,
+  Search,
+  Sparkles,
+  Eye,
+  ArrowLeft,
+} from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 import { FinderOptionCard, type FinderOption } from "./finder-option-card"
-import type { StoredChatThread, StoredChatCategory } from "@/lib/store/types"
+import type { StoredChatThread } from "@/lib/store/types"
+import { CATEGORY_LABELS, type StoredChatCategory } from "@/lib/store/types"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -31,13 +37,6 @@ interface FindResponse {
     confidence: number
     why: string
   }>
-}
-
-interface EphemeralMessage {
-  id: string
-  role: "user" | "assistant"
-  text: string
-  createdAt: number
 }
 
 // For normal chat messages (persisted)
@@ -62,11 +61,23 @@ function formatRelativeTime(timestamp: number): string {
   const seconds = Math.floor(diff / 1000)
   const minutes = Math.floor(seconds / 60)
   const hours = Math.floor(minutes / 60)
+  const days = Math.floor(hours / 24)
 
+  if (days > 0) return `${days}d ago`
   if (hours > 0) return `${hours}h ago`
   if (minutes > 0) return `${minutes}m ago`
   if (seconds > 10) return `${seconds}s ago`
   return "just now"
+}
+
+function formatDate(timestamp: number): string {
+  return new Date(timestamp).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  })
 }
 
 /**
@@ -91,7 +102,7 @@ function shouldAutoOpen(options: FinderOption[]): boolean {
 
 interface FinderViewProps {
   /**
-   * Currently selected chat ID (from URL)
+   * Currently selected chat ID (from URL) - used only for external navigation
    */
   currentChatId: string | null
   /**
@@ -114,21 +125,27 @@ interface FinderViewProps {
 
 export function FinderView({
   currentChatId,
-  currentChat,
-  onOpenChat,
-  isLoadingChat = false,
 }: FinderViewProps) {
-  const router = useRouter()
-  const searchParams = useSearchParams()
-
-  // Composer state
+  // Composer state - what user is currently typing
   const [inputValue, setInputValue] = useState("")
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  // Ephemeral finder state (not persisted)
+  // Request ID counter for race condition prevention
+  const requestIdRef = useRef(0)
+
+  // Submitted query state (drives search, NOT input typing)
+  const [submittedQuery, setSubmittedQuery] = useState<string | null>(null)
+
+  // Finder results state
   const [finderPending, setFinderPending] = useState(false)
-  const [finderQuery, setFinderQuery] = useState<string | null>(null)
   const [finderOptions, setFinderOptions] = useState<FinderOption[]>([])
+
+  // Preview state - when user clicks "Open" we show transcript preview
+  const [previewChatId, setPreviewChatId] = useState<string | null>(null)
+  const [previewChatData, setPreviewChatData] = useState<StoredChatThread | null>(null)
+  const [isLoadingPreview, setIsLoadingPreview] = useState(false)
+
+  // Opening state for transition effect
   const [openingChatId, setOpeningChatId] = useState<string | null>(null)
 
   // Normal chat state (for when intent is normal_chat)
@@ -155,7 +172,7 @@ export function FinderView({
     if (shouldAutoScroll.current) {
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
     }
-  }, [messages, finderOptions, finderPending, isResponding])
+  }, [messages, finderOptions, finderPending, isResponding, previewChatData])
 
   // Auto-resize textarea
   useEffect(() => {
@@ -166,39 +183,53 @@ export function FinderView({
     }
   }, [inputValue])
 
-  // Determine session state
-  const isEmptySession = !currentChatId || (currentChat?.messages.length === 0)
-  const isMidChat = !isEmptySession && (currentChat?.messages.length ?? 0) > 0
-
-  // Clear ephemeral state when chat changes
-  useEffect(() => {
-    setFinderQuery(null)
-    setFinderOptions([])
-    setOpeningChatId(null)
-  }, [currentChatId])
+  // Determine session state (for auto-open logic)
+  const isEmptySession = !currentChatId && messages.length === 0
 
   // ---------------------------------------------------------------------------
-  // Handle opening a chat
+  // Handle opening a chat (shows transcript preview)
   // ---------------------------------------------------------------------------
-  const handleOpenChat = useCallback(
-    async (chatId: string, useReplace: boolean) => {
-      setOpeningChatId(chatId)
+  const handleOpenChat = useCallback(async (chatId: string) => {
+    setOpeningChatId(chatId)
+    setIsLoadingPreview(true)
 
-      // Wait 500ms for the transition effect
-      await new Promise((resolve) => setTimeout(resolve, 500))
+    try {
+      // Fetch the chat data
+      const res = await fetch(`/api/chats/${chatId}`)
+      if (!res.ok) {
+        throw new Error("Failed to load chat")
+      }
 
-      onOpenChat(chatId, useReplace)
+      const data = await res.json()
+      const thread = data.thread as StoredChatThread
 
-      // Clear ephemeral state after navigation
-      setFinderQuery(null)
+      // Show the preview
+      setPreviewChatId(chatId)
+      setPreviewChatData(thread)
+
+      // Clear search results (but keep submittedQuery for reference)
       setFinderOptions([])
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : "Failed to load chat"
+      toast.error(errorMessage)
+    } finally {
+      setIsLoadingPreview(false)
       setOpeningChatId(null)
-    },
-    [onOpenChat]
-  )
+    }
+  }, [])
 
   // ---------------------------------------------------------------------------
-  // Handle sending a message
+  // Handle going back from preview to search
+  // ---------------------------------------------------------------------------
+  const handleBackFromPreview = useCallback(() => {
+    setPreviewChatId(null)
+    setPreviewChatData(null)
+    // Keep the submittedQuery so user can re-search easily
+  }, [])
+
+  // ---------------------------------------------------------------------------
+  // Handle sending a message (search query)
   // ---------------------------------------------------------------------------
   const handleSend = async () => {
     const userText = inputValue.trim()
@@ -206,6 +237,10 @@ export function FinderView({
 
     setInputValue("")
     shouldAutoScroll.current = true
+
+    // Clear any existing preview when starting a new search
+    setPreviewChatId(null)
+    setPreviewChatData(null)
 
     // Check for /find command shortcut
     if (userText.startsWith("/find ")) {
@@ -220,6 +255,10 @@ export function FinderView({
 
     // Step 1: Call intent detection API
     setFinderPending(true)
+    setSubmittedQuery(userText)
+
+    // Increment request ID to prevent race conditions
+    const currentRequestId = ++requestIdRef.current
 
     try {
       const intentRes = await fetch("/api/chats/intent", {
@@ -229,10 +268,15 @@ export function FinderView({
           message: userText,
           context: {
             isEmptySession,
-            isMidChat,
+            isMidChat: messages.length > 0,
           },
         }),
       })
+
+      // Check if this request is still the latest
+      if (requestIdRef.current !== currentRequestId) {
+        return // Newer request was made, discard this one
+      }
 
       if (!intentRes.ok) {
         const data = await intentRes.json()
@@ -243,17 +287,20 @@ export function FinderView({
 
       if (intentData.intent === "retrieve_chat") {
         // User wants to find a past chat
-        await handleRetrieveChat(userText, intentData.rewrittenQuery)
+        await handleRetrieveChat(userText, intentData.rewrittenQuery, currentRequestId)
       } else {
         // Normal chat - proceed with regular response
         setFinderPending(false)
         await handleNormalChat(userText)
       }
     } catch (error) {
-      setFinderPending(false)
-      const errorMessage =
-        error instanceof Error ? error.message : "Something went wrong"
-      toast.error(errorMessage)
+      // Only update state if this is still the current request
+      if (requestIdRef.current === currentRequestId) {
+        setFinderPending(false)
+        const errorMessage =
+          error instanceof Error ? error.message : "Something went wrong"
+        toast.error(errorMessage)
+      }
     }
   }
 
@@ -262,7 +309,14 @@ export function FinderView({
   // ---------------------------------------------------------------------------
   const handleFindCommand = async (query: string) => {
     setFinderPending(true)
-    setFinderQuery(query)
+    setSubmittedQuery(query)
+
+    // Clear preview when searching
+    setPreviewChatId(null)
+    setPreviewChatData(null)
+
+    // Increment request ID
+    const currentRequestId = ++requestIdRef.current
 
     try {
       const findRes = await fetch("/api/chats/find", {
@@ -270,6 +324,11 @@ export function FinderView({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query }),
       })
+
+      // Check if this request is still the latest
+      if (requestIdRef.current !== currentRequestId) {
+        return
+      }
 
       if (!findRes.ok) {
         const data = await findRes.json()
@@ -293,13 +352,15 @@ export function FinderView({
 
       // Handle auto-open for empty session
       if (isEmptySession && shouldAutoOpen(options)) {
-        await handleOpenChat(options[0].chatId, true) // router.replace
+        await handleOpenChat(options[0].chatId)
       }
     } catch (error) {
-      setFinderPending(false)
-      const errorMessage =
-        error instanceof Error ? error.message : "Failed to search"
-      toast.error(errorMessage)
+      if (requestIdRef.current === currentRequestId) {
+        setFinderPending(false)
+        const errorMessage =
+          error instanceof Error ? error.message : "Failed to search"
+        toast.error(errorMessage)
+      }
     }
   }
 
@@ -308,16 +369,20 @@ export function FinderView({
   // ---------------------------------------------------------------------------
   const handleRetrieveChat = async (
     originalQuery: string,
-    rewrittenQuery: string
+    rewrittenQuery: string,
+    currentRequestId: number
   ) => {
-    setFinderQuery(originalQuery)
-
     try {
       const findRes = await fetch("/api/chats/find", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: rewrittenQuery || originalQuery }),
       })
+
+      // Check if this request is still the latest
+      if (requestIdRef.current !== currentRequestId) {
+        return
+      }
 
       if (!findRes.ok) {
         const data = await findRes.json()
@@ -346,14 +411,15 @@ export function FinderView({
 
       // Handle auto-open for empty session
       if (isEmptySession && shouldAutoOpen(options)) {
-        await handleOpenChat(options[0].chatId, true) // router.replace
+        await handleOpenChat(options[0].chatId)
       }
-      // In mid-chat, always show options (require click)
     } catch (error) {
-      setFinderPending(false)
-      const errorMessage =
-        error instanceof Error ? error.message : "Failed to search"
-      toast.error(errorMessage)
+      if (requestIdRef.current === currentRequestId) {
+        setFinderPending(false)
+        const errorMessage =
+          error instanceof Error ? error.message : "Failed to search"
+        toast.error(errorMessage)
+      }
     }
   }
 
@@ -413,10 +479,7 @@ export function FinderView({
   // Handle option card click
   // ---------------------------------------------------------------------------
   const handleOptionClick = async (option: FinderOption) => {
-    // In mid-chat, use router.push so browser back returns
-    // In empty session, use router.replace (no back entry)
-    const useReplace = isEmptySession
-    await handleOpenChat(option.chatId, useReplace)
+    await handleOpenChat(option.chatId)
   }
 
   // ---------------------------------------------------------------------------
@@ -435,22 +498,104 @@ export function FinderView({
   // ---------------------------------------------------------------------------
   // Determine what to show
   // ---------------------------------------------------------------------------
-  const hasEphemeralContent = finderQuery !== null || finderOptions.length > 0
+  const showPreview = previewChatId !== null && previewChatData !== null
+  const hasEphemeralContent = submittedQuery !== null || finderOptions.length > 0
   const hasMessages = messages.length > 0
-  const showEmptyState = !hasEphemeralContent && !hasMessages && !finderPending && !isResponding
+  const showEmptyState = !showPreview && !hasEphemeralContent && !hasMessages && !finderPending && !isResponding
 
   // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
   return (
     <div className="flex flex-col h-full">
-      {/* Messages/Results area */}
+      {/* Messages/Results/Preview area */}
       <div
         ref={messagesContainerRef}
         onScroll={handleScroll}
         className="flex-1 overflow-y-auto"
       >
-        {showEmptyState ? (
+        {showPreview ? (
+          // Transcript Preview Mode
+          <div className="flex flex-col h-full">
+            {/* Preview header */}
+            <div className="p-4 border-b border-border bg-background sticky top-0 z-10">
+              <div className="flex items-center gap-3">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleBackFromPreview}
+                  className="gap-1.5"
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                  Back to search
+                </Button>
+                <div className="h-4 w-px bg-border" />
+                <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground bg-muted px-2 py-1 rounded-full">
+                  <Eye className="h-3 w-3" />
+                  Preview
+                </span>
+              </div>
+              <div className="mt-3">
+                <h2 className="font-semibold truncate">{previewChatData.title}</h2>
+                <div className="flex items-center gap-2 mt-0.5">
+                  <p className="text-xs text-muted-foreground">
+                    {formatDate(previewChatData.createdAt)} &bull;{" "}
+                    {previewChatData.messages.length} messages
+                  </p>
+                  <span className="text-[10px] px-1.5 py-0.5 bg-muted rounded text-muted-foreground">
+                    {CATEGORY_LABELS[previewChatData.category as StoredChatCategory]}
+                  </span>
+                </div>
+                {previewChatData.summary && (
+                  <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
+                    {previewChatData.summary}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {/* Preview messages */}
+            <div className="flex-1 p-4 space-y-4 bg-muted/30">
+              {previewChatData.messages.map((message) => (
+                <div
+                  key={message.id}
+                  className={cn(
+                    "flex",
+                    message.role === "user" ? "justify-end" : "justify-start"
+                  )}
+                >
+                  <div
+                    className={cn(
+                      "max-w-[80%] rounded-2xl px-4 py-3",
+                      message.role === "user"
+                        ? "bg-primary text-primary-foreground rounded-br-md"
+                        : message.role === "context"
+                        ? "bg-amber-500/10 text-foreground border border-amber-500/20 rounded-bl-md"
+                        : "bg-card text-card-foreground border border-border rounded-bl-md"
+                    )}
+                  >
+                    {message.role === "context" && (
+                      <div className="text-[10px] text-amber-600 dark:text-amber-400 font-medium mb-1">
+                        CONTEXT
+                      </div>
+                    )}
+                    <p className="text-sm whitespace-pre-wrap">{message.text}</p>
+                    <p
+                      className={cn(
+                        "text-[10px] mt-1",
+                        message.role === "user"
+                          ? "text-primary-foreground/70"
+                          : "text-muted-foreground/70"
+                      )}
+                    >
+                      {formatRelativeTime(message.createdAt)}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : showEmptyState ? (
           // Empty state
           <div className="flex flex-col items-center justify-center h-full text-center p-8">
             <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mb-4">
@@ -470,18 +615,18 @@ export function FinderView({
             </div>
           </div>
         ) : (
-          // Content area
+          // Content area (search results or normal chat)
           <div className="p-4 space-y-4">
             {/* Ephemeral finder query (user bubble) */}
-            {finderQuery && (
+            {submittedQuery && finderOptions.length === 0 && !finderPending && messages.length === 0 && (
               <div className="flex justify-end">
                 <div className="max-w-[80%] rounded-2xl rounded-br-md px-4 py-2.5 bg-primary text-primary-foreground">
                   <div className="flex items-center gap-1 mb-1 text-[10px] text-primary-foreground/70">
                     <Search className="h-3 w-3" />
-                    <span>Finding chat...</span>
+                    <span>Searched</span>
                   </div>
                   <p className="text-sm whitespace-pre-wrap break-words leading-relaxed">
-                    {finderQuery}
+                    {submittedQuery}
                   </p>
                 </div>
               </div>
@@ -489,44 +634,76 @@ export function FinderView({
 
             {/* Finder pending state */}
             {finderPending && (
-              <div className="flex items-start">
-                <div className="bg-muted rounded-2xl rounded-bl-md px-4 py-3">
-                  <div className="flex items-center gap-2">
-                    <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                    <span className="text-sm text-muted-foreground">
-                      Searching...
-                    </span>
+              <>
+                {/* Show the query being searched */}
+                {submittedQuery && (
+                  <div className="flex justify-end">
+                    <div className="max-w-[80%] rounded-2xl rounded-br-md px-4 py-2.5 bg-primary text-primary-foreground">
+                      <div className="flex items-center gap-1 mb-1 text-[10px] text-primary-foreground/70">
+                        <Search className="h-3 w-3" />
+                        <span>Finding chat...</span>
+                      </div>
+                      <p className="text-sm whitespace-pre-wrap break-words leading-relaxed">
+                        {submittedQuery}
+                      </p>
+                    </div>
+                  </div>
+                )}
+                <div className="flex items-start">
+                  <div className="bg-muted rounded-2xl rounded-bl-md px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                      <span className="text-sm text-muted-foreground">
+                        Searching...
+                      </span>
+                    </div>
                   </div>
                 </div>
-              </div>
+              </>
             )}
 
             {/* Finder options (assistant bubble with cards) */}
             {!finderPending && finderOptions.length > 0 && (
-              <div className="flex items-start">
-                <div className="max-w-[90%] space-y-3">
-                  <div className="flex items-center gap-2 text-sm text-muted-foreground mb-2">
-                    <Sparkles className="h-4 w-4" />
-                    <span>
-                      Found {finderOptions.length} matching{" "}
-                      {finderOptions.length === 1 ? "chat" : "chats"}
-                    </span>
+              <>
+                {/* Show the query that produced these results */}
+                {submittedQuery && (
+                  <div className="flex justify-end">
+                    <div className="max-w-[80%] rounded-2xl rounded-br-md px-4 py-2.5 bg-primary text-primary-foreground">
+                      <div className="flex items-center gap-1 mb-1 text-[10px] text-primary-foreground/70">
+                        <Search className="h-3 w-3" />
+                        <span>Searched</span>
+                      </div>
+                      <p className="text-sm whitespace-pre-wrap break-words leading-relaxed">
+                        {submittedQuery}
+                      </p>
+                    </div>
                   </div>
-                  {finderOptions.map((option) => (
-                    <FinderOptionCard
-                      key={option.chatId}
-                      option={option}
-                      onClick={() => handleOptionClick(option)}
-                      isOpening={openingChatId === option.chatId}
-                      disabled={openingChatId !== null}
-                    />
-                  ))}
+                )}
+                <div className="flex items-start">
+                  <div className="max-w-[90%] space-y-3">
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground mb-2">
+                      <Sparkles className="h-4 w-4" />
+                      <span>
+                        Found {finderOptions.length} matching{" "}
+                        {finderOptions.length === 1 ? "chat" : "chats"}
+                      </span>
+                    </div>
+                    {finderOptions.map((option) => (
+                      <FinderOptionCard
+                        key={option.chatId}
+                        option={option}
+                        onClick={() => handleOptionClick(option)}
+                        isOpening={openingChatId === option.chatId}
+                        disabled={openingChatId !== null || isLoadingPreview}
+                      />
+                    ))}
+                  </div>
                 </div>
-              </div>
+              </>
             )}
 
             {/* No results message */}
-            {!finderPending && finderQuery && finderOptions.length === 0 && (
+            {!finderPending && submittedQuery && finderOptions.length === 0 && messages.length === 0 && (
               <div className="flex items-start">
                 <div className="bg-muted rounded-2xl rounded-bl-md px-4 py-3">
                   <p className="text-sm text-muted-foreground">
@@ -585,12 +762,26 @@ export function FinderView({
               </div>
             )}
 
+            {/* Loading preview indicator */}
+            {isLoadingPreview && (
+              <div className="flex items-start">
+                <div className="bg-muted rounded-2xl rounded-bl-md px-4 py-3">
+                  <div className="flex items-center gap-2">
+                    <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                    <span className="text-sm text-muted-foreground">
+                      Loading chat...
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div ref={messagesEndRef} />
           </div>
         )}
       </div>
 
-      {/* Composer */}
+      {/* Composer - always the "find chat" input */}
       <div className="border-t border-border bg-card/50">
         <div className="flex items-end gap-2 p-4">
           <Textarea
@@ -598,14 +789,14 @@ export function FinderView({
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Find a chat or start a conversation..."
-            disabled={finderPending || isResponding}
+            placeholder="Ask to find a previous chat…"
+            disabled={finderPending || isResponding || isLoadingPreview}
             rows={1}
             className="min-h-[44px] max-h-[200px] resize-none bg-background"
           />
           <Button
             onClick={handleSend}
-            disabled={finderPending || isResponding || !inputValue.trim()}
+            disabled={finderPending || isResponding || isLoadingPreview || !inputValue.trim()}
             size="icon"
             className="h-[44px] w-[44px] shrink-0"
           >
