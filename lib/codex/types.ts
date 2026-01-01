@@ -29,6 +29,21 @@ export interface CodexFileChange {
 }
 
 /**
+ * Compact context summary for chat follow-ups
+ * Generated when a task completes, injected into chat context
+ */
+export interface CodexTaskContextSummary {
+  /** Task title */
+  title: string
+  /** Key file paths created/modified */
+  filePaths: string[]
+  /** Inferred programming languages from file extensions */
+  languages: string[]
+  /** 3-6 bullet summary of what was built */
+  bullets: string[]
+}
+
+/**
  * A Codex task that processes a user prompt and generates code changes
  */
 export interface CodexTask {
@@ -56,6 +71,8 @@ export interface CodexTask {
   prUrl?: string
   /** Error message if failed */
   error?: string
+  /** Compact context summary for chat follow-ups (generated on completion) */
+  contextSummary?: CodexTaskContextSummary
 }
 
 /**

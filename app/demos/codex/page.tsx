@@ -37,6 +37,52 @@ function generateId(): string {
 }
 
 /**
+ * Build a compact context block from recent completed tasks
+ * Used to give the chat model awareness of what code was generated
+ */
+function buildTaskContextForChat(
+  tasks: Record<string, CodexTask>,
+  maxTasks: number = 2
+): string | null {
+  // Get completed tasks with context summaries, sorted by most recent
+  const completedTasks = Object.values(tasks)
+    .filter((t) => t.contextSummary && 
+      (t.status === "draft_ready" || t.status === "applied" || t.status === "pr_created"))
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, maxTasks)
+  
+  if (completedTasks.length === 0) {
+    return null
+  }
+  
+  // Build compact context block
+  const contextBlocks: string[] = []
+  
+  for (const task of completedTasks) {
+    const summary = task.contextSummary!
+    const lines: string[] = [
+      `## Task: ${summary.title}`,
+      `Files: ${summary.filePaths.slice(0, 5).join(', ')}${summary.filePaths.length > 5 ? '...' : ''}`,
+    ]
+    
+    if (summary.languages.length > 0) {
+      lines.push(`Languages: ${summary.languages.join(', ')}`)
+    }
+    
+    if (summary.bullets.length > 0) {
+      lines.push('Summary:')
+      for (const bullet of summary.bullets.slice(0, 4)) {
+        lines.push(`- ${bullet}`)
+      }
+    }
+    
+    contextBlocks.push(lines.join('\n'))
+  }
+  
+  return `Recent Codex task outputs:\n\n${contextBlocks.join('\n\n---\n\n')}`
+}
+
+/**
  * Check if a message is a @codex command
  */
 function isCodexCommand(text: string): boolean {
@@ -238,11 +284,21 @@ export default function CodexDemoPage() {
         }
       } else {
         // Regular chat message - send to /api/respond
+        // Build task context from completed tasks (if any)
+        const taskContext = buildTaskContextForChat(tasks)
+        
+        // Construct input with context if available
+        let inputWithContext = text
+        if (taskContext) {
+          // Prepend context as a system-style block
+          inputWithContext = `[Context from recent Codex tasks - use this to answer questions about what was built]\n\n${taskContext}\n\n---\n\n[User message]\n${text}`
+        }
+        
         const res = await fetch("/api/respond", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            input: text,
+            input: inputWithContext,
             previous_response_id: lastResponseId,
             mode: "deep",
           }),
