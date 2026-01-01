@@ -144,7 +144,7 @@ const REASONING_EFFORT: Record<RequestKind, ReasoningEffort> = {
   intent: "low",
   stacks: "low",
   finder: "low",
-  codex: "medium", // Codex needs medium for quality code generation
+  codex: "low",
 }
 
 /**
