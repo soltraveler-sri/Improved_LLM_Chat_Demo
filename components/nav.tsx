@@ -7,6 +7,7 @@ import {
   GitBranch,
   History,
   Terminal,
+  Zap,
   Sun,
   Moon,
   Database,
@@ -38,6 +39,11 @@ const navItems = [
     href: "/demos/codex",
     label: "Codex",
     icon: Terminal,
+  },
+  {
+    href: "/demos/unified",
+    label: "Unified",
+    icon: Zap,
   },
 ]
 
