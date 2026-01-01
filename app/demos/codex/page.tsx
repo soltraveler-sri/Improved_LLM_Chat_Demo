@@ -37,49 +37,32 @@ function generateId(): string {
 }
 
 /**
- * Build a compact context block from recent completed tasks
- * Used to give the chat model awareness of what code was generated
+ * Build a compact context string from a task's context summary
+ * Used for ingesting task output into the chat chain
  */
-function buildTaskContextForChat(
-  tasks: Record<string, CodexTask>,
-  maxTasks: number = 2
-): string | null {
-  // Get completed tasks with context summaries, sorted by most recent
-  const completedTasks = Object.values(tasks)
-    .filter((t) => t.contextSummary && 
-      (t.status === "draft_ready" || t.status === "applied" || t.status === "pr_created"))
-    .sort((a, b) => b.updatedAt - a.updatedAt)
-    .slice(0, maxTasks)
+function buildTaskContextInput(task: CodexTask): string | null {
+  const summary = task.contextSummary
+  if (!summary) return null
   
-  if (completedTasks.length === 0) {
-    return null
+  const lines: string[] = [
+    `Context from completed Codex task "${summary.title}":`,
+    '',
+    `Files generated: ${summary.filePaths.slice(0, 5).join(', ')}${summary.filePaths.length > 5 ? '...' : ''}`,
+  ]
+  
+  if (summary.languages.length > 0) {
+    lines.push(`Languages: ${summary.languages.join(', ')}`)
   }
   
-  // Build compact context block
-  const contextBlocks: string[] = []
-  
-  for (const task of completedTasks) {
-    const summary = task.contextSummary!
-    const lines: string[] = [
-      `## Task: ${summary.title}`,
-      `Files: ${summary.filePaths.slice(0, 5).join(', ')}${summary.filePaths.length > 5 ? '...' : ''}`,
-    ]
-    
-    if (summary.languages.length > 0) {
-      lines.push(`Languages: ${summary.languages.join(', ')}`)
+  if (summary.bullets.length > 0) {
+    lines.push('')
+    lines.push('Summary of what was built:')
+    for (const bullet of summary.bullets.slice(0, 4)) {
+      lines.push(`- ${bullet}`)
     }
-    
-    if (summary.bullets.length > 0) {
-      lines.push('Summary:')
-      for (const bullet of summary.bullets.slice(0, 4)) {
-        lines.push(`- ${bullet}`)
-      }
-    }
-    
-    contextBlocks.push(lines.join('\n'))
   }
   
-  return `Recent Codex task outputs:\n\n${contextBlocks.join('\n\n---\n\n')}`
+  return lines.join('\n')
 }
 
 /**
@@ -106,11 +89,19 @@ export default function CodexDemoPage() {
   const [lastResponseId, setLastResponseId] = useState<string | null>(null)
   const [showWorkspace, setShowWorkspace] = useState(false)
 
-  // Refs for autoscroll
+  // Refs for autoscroll and task ingestion tracking
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const shouldAutoScroll = useRef(true)
+  const ingestedTaskIdsRef = useRef<Set<string>>(new Set())
+  const isIngestingRef = useRef(false)
+  const lastResponseIdRef = useRef<string | null>(null)
+  
+  // Keep ref in sync with state for use in async operations
+  useEffect(() => {
+    lastResponseIdRef.current = lastResponseId
+  }, [lastResponseId])
 
   // Fetch initial workspace
   useEffect(() => {
@@ -127,6 +118,81 @@ export default function CodexDemoPage() {
     }
     fetchWorkspace()
   }, [])
+
+  // Ingest a completed task's context into the chat chain
+  // This makes the chat truly stateful - the model will remember task outputs
+  const ingestTaskContext = useCallback(async (task: CodexTask) => {
+    const contextInput = buildTaskContextInput(task)
+    if (!contextInput) return
+
+    try {
+      // Use ref to get the current chain ID (important for sequential ingestion)
+      const currentResponseId = lastResponseIdRef.current
+      
+      const res = await fetch("/api/respond", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          input: contextInput,
+          previous_response_id: currentResponseId,
+          mode: "deep",
+        }),
+      })
+
+      const data = await res.json()
+
+      if (!res.ok) {
+        console.error("Failed to ingest task context:", data.error)
+        return
+      }
+
+      // Update both ref (immediately) and state (for UI/chain)
+      // This ensures sequential ingestions use the correct chain ID
+      lastResponseIdRef.current = data.id
+      setLastResponseId(data.id)
+      
+      if (process.env.NODE_ENV === "development") {
+        console.log(`[Codex:ingest] Task "${task.id.slice(0, 8)}..." ingested into chain, new responseId: ${data.id?.slice(0, 12)}...`)
+      }
+    } catch (error) {
+      console.error("Failed to ingest task context:", error)
+    }
+  }, [])
+
+  // Watch for completed tasks and ingest them into the chat chain
+  // This runs after each task state update to check for newly completed tasks
+  useEffect(() => {
+    async function ingestCompletedTasks() {
+      // Prevent concurrent ingestion
+      if (isIngestingRef.current) return
+      
+      // Find completed tasks that haven't been ingested yet
+      const completedTasks = Object.values(tasks)
+        .filter(t => 
+          t.contextSummary &&
+          (t.status === "draft_ready" || t.status === "applied" || t.status === "pr_created") &&
+          !ingestedTaskIdsRef.current.has(t.id)
+        )
+        .sort((a, b) => a.updatedAt - b.updatedAt) // Oldest first to maintain chain order
+      
+      if (completedTasks.length === 0) return
+      
+      isIngestingRef.current = true
+      
+      try {
+        // Ingest tasks sequentially to maintain chain order
+        for (const task of completedTasks) {
+          // Mark as ingested before the call to prevent double-ingestion
+          ingestedTaskIdsRef.current.add(task.id)
+          await ingestTaskContext(task)
+        }
+      } finally {
+        isIngestingRef.current = false
+      }
+    }
+    
+    ingestCompletedTasks()
+  }, [tasks, ingestTaskContext])
 
   // Track scroll position
   const handleScroll = useCallback(() => {
@@ -284,21 +350,13 @@ export default function CodexDemoPage() {
         }
       } else {
         // Regular chat message - send to /api/respond
-        // Build task context from completed tasks (if any)
-        const taskContext = buildTaskContextForChat(tasks)
-        
-        // Construct input with context if available
-        let inputWithContext = text
-        if (taskContext) {
-          // Prepend context as a system-style block
-          inputWithContext = `[Context from recent Codex tasks - use this to answer questions about what was built]\n\n${taskContext}\n\n---\n\n[User message]\n${text}`
-        }
-        
+        // Context from completed tasks is already in the chain via ingestion,
+        // so we just send the user's message directly
         const res = await fetch("/api/respond", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            input: inputWithContext,
+            input: text,
             previous_response_id: lastResponseId,
             mode: "deep",
           }),
@@ -344,7 +402,9 @@ export default function CodexDemoPage() {
     setMessages([])
     setTasks({})
     setLastResponseId(null)
+    lastResponseIdRef.current = null
     setInputValue("")
+    ingestedTaskIdsRef.current.clear()
     toast.success("Chat cleared")
   }
 
