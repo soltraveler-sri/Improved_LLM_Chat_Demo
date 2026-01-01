@@ -32,12 +32,14 @@ export {
   getModel,
   getChainedChatModel,
   getReasoningEffort,
+  getReasoningEffortFallback,
   getTextVerbosity,
   getConfigInfo,
 
   // Request builders
   createTextResponse,
   createParsedResponse,
+  createSummarizeResponse,
 
   // Error handling
   formatOpenAIError,

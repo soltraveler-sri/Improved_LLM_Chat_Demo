@@ -102,7 +102,7 @@ function MergeProgressOverlay({ mergeMode }: { mergeMode: "summary" | "full" }) 
 
         {/* Timing hint */}
         <p className="text-[10px] text-muted-foreground/60">
-          Usually takes 1–3 seconds
+          Usually takes 5–10 seconds
         </p>
       </div>
     </div>

@@ -61,15 +61,16 @@ const DEFAULT_MODELS: Record<RequestKind, string> = {
 
 /**
  * Environment variable names for model overrides
+ * Note: summarize supports both OPENAI_SUMMARY_MODEL and OPENAI_MODEL_SUMMARIZE
  */
-const MODEL_ENV_VARS: Record<RequestKind, string> = {
-  chat_fast: "OPENAI_MODEL_FAST",
-  chat_deep: "OPENAI_MODEL_DEEP",
-  summarize: "OPENAI_MODEL_SUMMARIZE",
-  intent: "OPENAI_MODEL_INTENT",
-  stacks: "OPENAI_MODEL_STACKS",
-  finder: "OPENAI_MODEL_FINDER",
-  codex: "OPENAI_MODEL_CODEX",
+const MODEL_ENV_VARS: Record<RequestKind, string[]> = {
+  chat_fast: ["OPENAI_MODEL_FAST"],
+  chat_deep: ["OPENAI_MODEL_DEEP"],
+  summarize: ["OPENAI_SUMMARY_MODEL", "OPENAI_MODEL_SUMMARIZE"],
+  intent: ["OPENAI_MODEL_INTENT"],
+  stacks: ["OPENAI_MODEL_STACKS"],
+  finder: ["OPENAI_MODEL_FINDER"],
+  codex: ["OPENAI_MODEL_CODEX"],
 }
 
 // Track if we've already warned about model mismatch (to avoid spamming logs)
@@ -125,19 +126,32 @@ export function getChainedChatModel(): string {
 }
 
 /**
+ * Reasoning effort type - GPT-5 supports "minimal", "low", "medium", "high"
+ * Note: "none" is NOT supported by GPT-5 series
+ */
+type ReasoningEffort = "minimal" | "low" | "medium" | "high"
+
+/**
  * Reasoning effort for each request kind
  *
- * IMPORTANT: GPT-5 series models do NOT support "none" - minimum is "low"
- * Only use "low", "medium", or "high"
+ * IMPORTANT: GPT-5 series models do NOT support "none"
+ * For summarization, we use "minimal" for fastest performance
  */
-const REASONING_EFFORT: Record<RequestKind, "low" | "medium" | "high"> = {
+const REASONING_EFFORT: Record<RequestKind, ReasoningEffort> = {
   chat_fast: "low",
   chat_deep: "high",
-  summarize: "low",
+  summarize: "minimal", // Use minimal for fastest summarization
   intent: "low",
   stacks: "low",
   finder: "low",
   codex: "medium", // Codex needs medium for quality code generation
+}
+
+/**
+ * Fallback reasoning effort if the primary is rejected by the API
+ */
+const REASONING_EFFORT_FALLBACK: Partial<Record<RequestKind, ReasoningEffort>> = {
+  summarize: "low", // Fall back to "low" if "minimal" is rejected
 }
 
 /**
@@ -193,15 +207,28 @@ export function getModel(kind: RequestKind): string {
     return getChainedChatModel()
   }
 
-  const envVar = MODEL_ENV_VARS[kind]
-  return process.env[envVar] || DEFAULT_MODELS[kind]
+  const envVars = MODEL_ENV_VARS[kind]
+  // Check each env var in priority order
+  for (const envVar of envVars) {
+    if (process.env[envVar]) {
+      return process.env[envVar]!
+    }
+  }
+  return DEFAULT_MODELS[kind]
 }
 
 /**
  * Get the reasoning effort for a request kind
  */
-export function getReasoningEffort(kind: RequestKind): "low" | "medium" | "high" {
+export function getReasoningEffort(kind: RequestKind): ReasoningEffort {
   return REASONING_EFFORT[kind]
+}
+
+/**
+ * Get the fallback reasoning effort for a request kind (if any)
+ */
+export function getReasoningEffortFallback(kind: RequestKind): ReasoningEffort | undefined {
+  return REASONING_EFFORT_FALLBACK[kind]
 }
 
 /**
@@ -216,12 +243,14 @@ export function getTextVerbosity(kind: RequestKind): "low" | "medium" | "high" {
  */
 export function getConfigInfo(kind: RequestKind): {
   model: string
-  reasoning: string
+  reasoning: ReasoningEffort
+  reasoningFallback: ReasoningEffort | undefined
   verbosity: string
 } {
   return {
     model: getModel(kind),
     reasoning: getReasoningEffort(kind),
+    reasoningFallback: getReasoningEffortFallback(kind),
     verbosity: getTextVerbosity(kind),
   }
 }
@@ -240,7 +269,7 @@ type NonStreamingResponseParams = OpenAI.Responses.ResponseCreateParamsNonStream
  *
  * This function ensures:
  * - Correct model is selected
- * - Reasoning effort is always "low" or higher (never "none")
+ * - Reasoning effort is set appropriately (GPT-5 supports "minimal", "low", "medium", "high")
  * - Text verbosity is set appropriately
  * - No unsupported parameters are sent
  * - Chained kinds (chat_fast, chat_deep) use store: true for previous_response_id
@@ -251,16 +280,20 @@ function buildCommonParams(
   options?: {
     previousResponseId?: string | null
     instructions?: string
+    reasoningEffortOverride?: ReasoningEffort
+    storeOverride?: boolean
   }
 ): NonStreamingResponseParams {
   const model = getModel(kind)
-  const reasoning = getReasoningEffort(kind)
+  const reasoning = options?.reasoningEffortOverride ?? getReasoningEffort(kind)
   const verbosity = getTextVerbosity(kind)
 
   // Chained kinds MUST use store: true for previous_response_id to work.
-  // This applies to EVERY turn of the chain, including the first turn,
-  // otherwise the next turn cannot reference this response ID.
-  const shouldStore = CHAINED_KINDS.has(kind)
+  // For summarization, we always use store: false.
+  // storeOverride allows explicit control.
+  const shouldStore = options?.storeOverride !== undefined 
+    ? options.storeOverride 
+    : CHAINED_KINDS.has(kind)
 
   const params: NonStreamingResponseParams = {
     model,
@@ -293,11 +326,14 @@ export async function createTextResponse(options: {
   input: string | OpenAI.Responses.ResponseInput
   previousResponseId?: string | null
   instructions?: string
+  abortSignal?: AbortSignal
+  storeOverride?: boolean
 }): Promise<OpenAI.Responses.Response> {
   const client = getOpenAIClient()
   const params = buildCommonParams(options.kind, options.input, {
     previousResponseId: options.previousResponseId,
     instructions: options.instructions,
+    storeOverride: options.storeOverride,
   })
 
   const config = getConfigInfo(options.kind)
@@ -309,7 +345,9 @@ export async function createTextResponse(options: {
   })
 
   try {
-    const response = await client.responses.create(params)
+    const response = await client.responses.create(params, {
+      signal: options.abortSignal,
+    })
 
     console.log(`[OpenAI:${options.kind}] Response:`, {
       id: response.id,
@@ -320,6 +358,124 @@ export async function createTextResponse(options: {
     return response
   } catch (error) {
     handleOpenAIError(error, options.kind, config)
+    throw error
+  }
+}
+
+/**
+ * Create a summarization response with timeout and reasoning effort fallback
+ * 
+ * This function is optimized for speed:
+ * - Uses "minimal" reasoning effort (falls back to "low" if rejected)
+ * - Supports abort signal for timeout
+ * - Always uses store: false (summarization shouldn't affect chaining state)
+ * - Includes instrumentation logging for debugging
+ */
+export async function createSummarizeResponse(options: {
+  input: string | OpenAI.Responses.ResponseInput
+  instructions?: string
+  abortSignal?: AbortSignal
+}): Promise<{
+  response: OpenAI.Responses.Response
+  durationMs: number
+  reasoningUsed: ReasoningEffort
+  timedOut: boolean
+}> {
+  const client = getOpenAIClient()
+  const config = getConfigInfo("summarize")
+  const startTime = Date.now()
+  
+  let reasoningUsed = config.reasoning
+  let timedOut = false
+
+  // Dev-only instrumentation logging
+  if (process.env.NODE_ENV === "development") {
+    console.log(`[Summarize:start]`, {
+      model: config.model,
+      reasoning: config.reasoning,
+      reasoningFallback: config.reasoningFallback,
+      verbosity: config.verbosity,
+    })
+  }
+
+  const attemptRequest = async (reasoning: ReasoningEffort): Promise<OpenAI.Responses.Response> => {
+    const params = buildCommonParams("summarize", options.input, {
+      instructions: options.instructions,
+      reasoningEffortOverride: reasoning,
+      storeOverride: false, // Summarization never stores
+    })
+
+    return client.responses.create(params, {
+      signal: options.abortSignal,
+    })
+  }
+
+  try {
+    // Try with primary reasoning effort (minimal)
+    const response = await attemptRequest(reasoningUsed)
+    const durationMs = Date.now() - startTime
+
+    // Dev-only instrumentation logging
+    if (process.env.NODE_ENV === "development") {
+      console.log(`[Summarize:complete]`, {
+        id: response.id,
+        model: response.model,
+        durationMs,
+        reasoningUsed,
+        timedOut: false,
+      })
+    }
+
+    return { response, durationMs, reasoningUsed, timedOut }
+  } catch (error) {
+    const durationMs = Date.now() - startTime
+
+    // Check if this is an abort/timeout
+    if (error instanceof Error && error.name === "AbortError") {
+      timedOut = true
+      if (process.env.NODE_ENV === "development") {
+        console.log(`[Summarize:timeout]`, {
+          durationMs,
+          reasoningUsed,
+          timedOut: true,
+        })
+      }
+      throw error
+    }
+
+    // Check if the API rejected "minimal" reasoning effort - retry with fallback
+    if (
+      config.reasoningFallback &&
+      error instanceof OpenAI.APIError &&
+      (error.message.includes("reasoning") || 
+       error.message.includes("minimal") ||
+       error.code === "invalid_parameter_value")
+    ) {
+      console.log(`[Summarize] "minimal" reasoning rejected, retrying with "${config.reasoningFallback}"`)
+      reasoningUsed = config.reasoningFallback
+
+      try {
+        const response = await attemptRequest(reasoningUsed)
+        const finalDurationMs = Date.now() - startTime
+
+        if (process.env.NODE_ENV === "development") {
+          console.log(`[Summarize:complete:fallback]`, {
+            id: response.id,
+            model: response.model,
+            durationMs: finalDurationMs,
+            reasoningUsed,
+            timedOut: false,
+          })
+        }
+
+        return { response, durationMs: finalDurationMs, reasoningUsed, timedOut }
+      } catch (fallbackError) {
+        handleOpenAIError(fallbackError, "summarize", config)
+        throw fallbackError
+      }
+    }
+
+    handleOpenAIError(error, "summarize", config)
     throw error
   }
 }
