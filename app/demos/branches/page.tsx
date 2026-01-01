@@ -285,6 +285,12 @@ export default function BranchesDemo() {
     setActiveBranchId(branchId)
   }
 
+  /**
+   * Client-side timeout for summarization (30 seconds)
+   * This ensures UI is never stuck if server hangs
+   */
+  const SUMMARIZE_TIMEOUT_MS = 30_000
+
   // Perform merge operation: summarize or full transcript injection
   const performMerge = async (
     branch: BranchThread,
@@ -294,26 +300,48 @@ export default function BranchesDemo() {
       let contextInput: string
 
       if (mergeMode === "summary") {
-        // Call summarize API
-        const summarizeRes = await fetch("/api/summarize", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            branchMessages: branch.messages.map((m) => ({
-              role: m.role as "user" | "assistant",
-              text: m.text,
-            })),
-          }),
-        })
+        // Create abort controller for client-side timeout
+        const abortController = new AbortController()
+        const timeoutId = setTimeout(() => {
+          abortController.abort()
+        }, SUMMARIZE_TIMEOUT_MS)
 
-        const summarizeData = await summarizeRes.json()
+        try {
+          // Call summarize API with timeout
+          const summarizeRes = await fetch("/api/summarize", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              branchMessages: branch.messages.map((m) => ({
+                role: m.role as "user" | "assistant",
+                text: m.text,
+              })),
+            }),
+            signal: abortController.signal,
+          })
 
-        if (!summarizeRes.ok) {
-          throw new Error(summarizeData.error || "Failed to summarize")
+          clearTimeout(timeoutId)
+
+          const summarizeData = await summarizeRes.json()
+
+          if (!summarizeRes.ok) {
+            // Check if server-side timeout
+            if (summarizeData.timeout) {
+              throw new Error("Summarization timed out")
+            }
+            throw new Error(summarizeData.error || "Failed to summarize")
+          }
+
+          const summary = (summarizeData as SummarizeResponse).summary
+          contextInput = `Context from a side thread "${branch.title}" (summary):\n${summary}`
+        } catch (error) {
+          clearTimeout(timeoutId)
+          // Handle abort error specifically
+          if (error instanceof Error && error.name === "AbortError") {
+            throw new Error("Summarization timed out")
+          }
+          throw error
         }
-
-        const summary = (summarizeData as SummarizeResponse).summary
-        contextInput = `Context from a side thread "${branch.title}" (summary):\n${summary}`
       } else {
         // Full transcript
         const transcript = branch.messages
@@ -443,9 +471,34 @@ export default function BranchesDemo() {
         )
       }
     } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : "Failed to merge branch"
-      toast.error("Merge failed", { description: errorMessage })
+      // Graceful failure: revert the includeInMain toggle to off
+      const revertedBranch: BranchThread = {
+        ...branch,
+        includeInMain: false,
+        updatedAt: Date.now(),
+      }
+
+      setBranchesByParentLocalId((prev) => {
+        const parentId = branch.parentAssistantLocalId
+        const branches = prev[parentId] || []
+        const updatedBranches = branches.map((b) =>
+          b.id === branch.id ? revertedBranch : b
+        )
+        return {
+          ...prev,
+          [parentId]: updatedBranches,
+        }
+      })
+
+      // Show failure toast
+      const isTimeout = error instanceof Error && error.message.includes("timed out")
+      toast.error("Summarization failed", {
+        description: isTimeout
+          ? "The request took too long. You can retry by toggling again."
+          : error instanceof Error
+          ? error.message
+          : "Failed to merge branch. You can retry by toggling again.",
+      })
     } finally {
       setIsMerging(false)
       setActiveBranchId(null)
@@ -587,7 +640,7 @@ export default function BranchesDemo() {
 
               {/* Timing hint */}
               <p className="text-[10px] text-muted-foreground/60">
-                Usually takes 1–3 seconds
+                Usually takes 5–10 seconds
               </p>
             </div>
           </div>
