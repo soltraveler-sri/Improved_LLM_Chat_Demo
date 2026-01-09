@@ -513,7 +513,7 @@ export default function CodexDemoPage() {
                         workspace={workspace || undefined}
                         onApplyChanges={() => applyTaskChanges(task.id)}
                         onCreatePR={() => createTaskPR(task.id)}
-                        onRefresh={() => void refreshTask(task.id)}
+                        onRefresh={async () => { await refreshTask(task.id) }}
                       />
                     )
                   }
