@@ -733,9 +733,30 @@ function UnifiedDemoContent() {
         }),
       }))
 
+      // Track which task to use for ingestion (either the returned task or the refreshed one)
+      let taskForIngestion: CodexTask = task
+
       // Poll for completion if still running
       if (task.status === "running" || task.status === "queued") {
-        await refreshTask(task.id)
+        const refreshedTask = await refreshTask(task.id)
+        if (refreshedTask) {
+          taskForIngestion = refreshedTask
+        }
+      }
+
+      // CRITICAL: Ingest task context synchronously BEFORE re-enabling input
+      // This ensures the chat chain is updated before the user can send follow-ups.
+      // The useEffect-based ingestion serves as a fallback for edge cases.
+      // We check ingestedTaskIdsRef to prevent double-ingestion.
+      if (taskForIngestion.contextSummary && !ingestedTaskIdsRef.current.has(taskForIngestion.id)) {
+        ingestedTaskIdsRef.current.add(taskForIngestion.id)
+        await ingestTaskContext(taskForIngestion)
+
+        if (process.env.NODE_ENV === "development") {
+          console.log(
+            `[Unified:handleCodexCommand] Task "${taskForIngestion.id.slice(0, 8)}..." context ingested synchronously`
+          )
+        }
       }
     } catch (error) {
       const errorMessage =
@@ -1003,15 +1024,20 @@ function UnifiedDemoContent() {
   }
 
   // Codex task helpers
-  const refreshTask = async (taskId: string) => {
+  // Returns the refreshed task so callers can use it for synchronous ingestion
+  const refreshTask = async (taskId: string): Promise<CodexTask | null> => {
     try {
       const res = await fetch(`/api/codex/tasks/${taskId}`)
       if (res.ok) {
         const data = await res.json()
-        setTasks((prev) => ({ ...prev, [taskId]: data.task }))
+        const refreshedTask = data.task as CodexTask
+        setTasks((prev) => ({ ...prev, [taskId]: refreshedTask }))
+        return refreshedTask
       }
+      return null
     } catch (error) {
       console.error("Failed to refresh task:", error)
+      return null
     }
   }
 
@@ -1160,7 +1186,7 @@ function UnifiedDemoContent() {
                       workspace={workspace || undefined}
                       onApplyChanges={() => applyTaskChanges(task.id)}
                       onCreatePR={() => createTaskPR(task.id)}
-                      onRefresh={() => refreshTask(task.id)}
+                      onRefresh={async () => { await refreshTask(task.id) }}
                     />
                   )
                 }
