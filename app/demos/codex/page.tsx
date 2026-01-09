@@ -219,16 +219,20 @@ export default function CodexDemoPage() {
     }
   }, [inputValue])
 
-  // Refresh a task
-  const refreshTask = async (taskId: string) => {
+  // Refresh a task - returns the refreshed task for synchronous ingestion
+  const refreshTask = async (taskId: string): Promise<CodexTask | null> => {
     try {
       const res = await fetch(`/api/codex/tasks/${taskId}`)
       if (res.ok) {
         const data = await res.json()
-        setTasks((prev) => ({ ...prev, [taskId]: data.task }))
+        const refreshedTask = data.task as CodexTask
+        setTasks((prev) => ({ ...prev, [taskId]: refreshedTask }))
+        return refreshedTask
       }
+      return null
     } catch (error) {
       console.error("Failed to refresh task:", error)
+      return null
     }
   }
 
@@ -344,9 +348,29 @@ export default function CodexDemoPage() {
           )
         )
 
+        // Track which task to use for ingestion
+        let taskForIngestion: CodexTask = task
+
         // Poll for completion if still running
         if (task.status === "running" || task.status === "queued") {
-          await refreshTask(task.id)
+          const refreshedTask = await refreshTask(task.id)
+          if (refreshedTask) {
+            taskForIngestion = refreshedTask
+          }
+        }
+
+        // CRITICAL: Ingest task context synchronously BEFORE re-enabling input
+        // This ensures the chat chain is updated before the user can send follow-ups.
+        // The useEffect-based ingestion serves as a fallback for edge cases.
+        if (taskForIngestion.contextSummary && !ingestedTaskIdsRef.current.has(taskForIngestion.id)) {
+          ingestedTaskIdsRef.current.add(taskForIngestion.id)
+          await ingestTaskContext(taskForIngestion)
+
+          if (process.env.NODE_ENV === "development") {
+            console.log(
+              `[Codex:handleSend] Task "${taskForIngestion.id.slice(0, 8)}..." context ingested synchronously`
+            )
+          }
         }
       } else {
         // Regular chat message - send to /api/respond
