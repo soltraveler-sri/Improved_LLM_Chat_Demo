@@ -9,19 +9,20 @@ import {
 export const runtime = "nodejs"
 
 /**
- * Summarization timeout in milliseconds (30 seconds)
+ * Summarization timeout in milliseconds (15 seconds)
  * This is a hard limit to ensure responsive UX
  */
-const SUMMARIZE_TIMEOUT_MS = 30_000
+const SUMMARIZE_TIMEOUT_MS = 15_000
 
-const SUMMARIZE_PROMPT = `Summarize the following conversation into 3-5 short bullet points.
-Focus on:
-- Key decisions made
-- Important facts discovered
-- Conclusions reached
+/**
+ * Fast, minimal prompt for short conversations (1-3 messages)
+ */
+const SUMMARIZE_PROMPT_SHORT = `Summarize in 1-2 bullet points. Be extremely brief. Format: "• point"`
 
-Be extremely concise. No fluff. Plain text only.
-Format as bullet points starting with "•".`
+/**
+ * Standard prompt for longer conversations
+ */
+const SUMMARIZE_PROMPT_STANDARD = `Summarize in 2-4 brief bullet points. Key points only. Format: "• point"`
 
 interface SummarizeRequest {
   branchMessages: Array<{ role: "user" | "assistant"; text: string }>
@@ -48,12 +49,14 @@ export async function POST(request: NextRequest) {
     // Build conversation transcript for summarization
     const transcript = body.branchMessages
       .map((msg) => `${msg.role === "user" ? "User" : "Assistant"}: ${msg.text}`)
-      .join("\n\n")
+      .join("\n")
 
-    const maxBullets = body.maxBullets || 5
-    const prompt = `${SUMMARIZE_PROMPT}\n\nLimit to ${maxBullets} bullets maximum.\n\nConversation:\n${transcript}`
+    // Use shorter prompt for brief conversations (faster response)
+    const isShortConversation = body.branchMessages.length <= 3
+    const basePrompt = isShortConversation ? SUMMARIZE_PROMPT_SHORT : SUMMARIZE_PROMPT_STANDARD
+    const prompt = `${basePrompt}\n\n${transcript}`
 
-    // Create abort controller with 30s timeout
+    // Create abort controller with timeout
     const abortController = new AbortController()
     const timeoutId = setTimeout(() => {
       abortController.abort()

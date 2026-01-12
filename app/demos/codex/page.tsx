@@ -97,6 +97,8 @@ export default function CodexDemoPage() {
   const ingestedTaskIdsRef = useRef<Set<string>>(new Set())
   const isIngestingRef = useRef(false)
   const lastResponseIdRef = useRef<string | null>(null)
+  // Track pending ingestion promise so we can await it before sending messages
+  const pendingIngestionRef = useRef<Promise<void> | null>(null)
   
   // Keep ref in sync with state for use in async operations
   useEffect(() => {
@@ -359,20 +361,31 @@ export default function CodexDemoPage() {
           }
         }
 
-        // CRITICAL: Ingest task context synchronously BEFORE re-enabling input
-        // This ensures the chat chain is updated before the user can send follow-ups.
-        // The useEffect-based ingestion serves as a fallback for edge cases.
+        // Re-enable input immediately so user doesn't see "..." after task completes
+        setIsLoading(false)
+
+        // Start ingestion in background - track with ref so regular chat can await if needed
+        // This prevents the race condition while avoiding the visible "..." indicator
         if (taskForIngestion.contextSummary && !ingestedTaskIdsRef.current.has(taskForIngestion.id)) {
           ingestedTaskIdsRef.current.add(taskForIngestion.id)
-          await ingestTaskContext(taskForIngestion)
+
+          const ingestionPromise = ingestTaskContext(taskForIngestion).finally(() => {
+            pendingIngestionRef.current = null
+          })
+          pendingIngestionRef.current = ingestionPromise
 
           if (process.env.NODE_ENV === "development") {
             console.log(
-              `[Codex:handleSend] Task "${taskForIngestion.id.slice(0, 8)}..." context ingested synchronously`
+              `[Codex:handleSend] Task "${taskForIngestion.id.slice(0, 8)}..." context ingestion started (background)`
             )
           }
         }
       } else {
+        // Await any pending task context ingestion before sending regular chat
+        // This prevents race condition where model doesn't see recent task context
+        if (pendingIngestionRef.current) {
+          await pendingIngestionRef.current
+        }
         // Regular chat message - send to /api/respond
         // Context from completed tasks is already in the chain via ingestion,
         // so we just send the user's message directly
@@ -429,6 +442,7 @@ export default function CodexDemoPage() {
     lastResponseIdRef.current = null
     setInputValue("")
     ingestedTaskIdsRef.current.clear()
+    pendingIngestionRef.current = null
     toast.success("Chat cleared")
   }
 

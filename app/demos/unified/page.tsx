@@ -209,6 +209,8 @@ function UnifiedDemoContent() {
   const [workspace, setWorkspace] = useState<WorkspaceSnapshot | null>(null)
   const ingestedTaskIdsRef = useRef<Set<string>>(new Set())
   const isIngestingRef = useRef(false)
+  // Track pending ingestion promise so we can await it before sending messages
+  const pendingIngestionRef = useRef<Promise<void> | null>(null)
 
   // ==========================================================================
   // FIND STATE
@@ -429,7 +431,7 @@ function UnifiedDemoContent() {
   // BRANCH MERGE (from Demo 1)
   // ==========================================================================
 
-  const SUMMARIZE_TIMEOUT_MS = 30_000
+  const SUMMARIZE_TIMEOUT_MS = 15_000
 
   const performMerge = async (
     branch: BranchThread,
@@ -744,17 +746,22 @@ function UnifiedDemoContent() {
         }
       }
 
-      // CRITICAL: Ingest task context synchronously BEFORE re-enabling input
-      // This ensures the chat chain is updated before the user can send follow-ups.
-      // The useEffect-based ingestion serves as a fallback for edge cases.
-      // We check ingestedTaskIdsRef to prevent double-ingestion.
+      // Re-enable input immediately so user doesn't see "..." after task completes
+      setIsLoading(false)
+
+      // Start ingestion in background - track with ref so handleRegularChat can await if needed
+      // This prevents the race condition while avoiding the visible "..." indicator
       if (taskForIngestion.contextSummary && !ingestedTaskIdsRef.current.has(taskForIngestion.id)) {
         ingestedTaskIdsRef.current.add(taskForIngestion.id)
-        await ingestTaskContext(taskForIngestion)
+
+        const ingestionPromise = ingestTaskContext(taskForIngestion).finally(() => {
+          pendingIngestionRef.current = null
+        })
+        pendingIngestionRef.current = ingestionPromise
 
         if (process.env.NODE_ENV === "development") {
           console.log(
-            `[Unified:handleCodexCommand] Task "${taskForIngestion.id.slice(0, 8)}..." context ingested synchronously`
+            `[Unified:handleCodexCommand] Task "${taskForIngestion.id.slice(0, 8)}..." context ingestion started (background)`
           )
         }
       }
@@ -762,13 +769,18 @@ function UnifiedDemoContent() {
       const errorMessage =
         error instanceof Error ? error.message : "Something went wrong"
       toast.error(errorMessage)
-    } finally {
       setIsLoading(false)
     }
   }
 
   // Handle regular chat message
   const handleRegularChat = async (userText: string) => {
+    // Await any pending task context ingestion before sending
+    // This prevents race condition where model doesn't see recent task context
+    if (pendingIngestionRef.current) {
+      await pendingIngestionRef.current
+    }
+
     const userMessage: UnifiedMessage = {
       localId: generateId(),
       role: "user",
@@ -1095,6 +1107,7 @@ function UnifiedDemoContent() {
     storedThreadIdRef.current = null
     ingestedTaskIdsRef.current.clear()
     lastResponseIdRef.current = null
+    pendingIngestionRef.current = null
     toast.success("Chat cleared")
   }
 
