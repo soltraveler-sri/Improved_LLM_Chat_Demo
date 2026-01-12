@@ -431,7 +431,24 @@ function UnifiedDemoContent() {
   // BRANCH MERGE (from Demo 1)
   // ==========================================================================
 
-  const SUMMARIZE_TIMEOUT_MS = 15_000
+  // Threshold for skipping LLM summarization - short chats get embedded directly
+  const SKIP_SUMMARIZATION_THRESHOLD = 10
+
+  /**
+   * Format branch messages as bullet points (looks like a summary but is the full content)
+   * Used for short conversations where LLM summarization would be slower than helpful
+   */
+  const formatAsQuickSummary = (messages: BranchThread["messages"]): string => {
+    // For very short conversations, just use a compact format
+    const lines: string[] = []
+    for (const m of messages) {
+      const prefix = m.role === "user" ? "User asked:" : "Assistant:"
+      // Truncate long messages for the visual "summary"
+      const text = m.text.length > 150 ? m.text.slice(0, 147) + "..." : m.text
+      lines.push(`• ${prefix} ${text}`)
+    }
+    return lines.join("\n")
+  }
 
   const performMerge = async (
     branch: BranchThread,
@@ -441,12 +458,13 @@ function UnifiedDemoContent() {
       let contextInput: string
 
       if (mergeMode === "summary") {
-        const abortController = new AbortController()
-        const timeoutId = setTimeout(() => {
-          abortController.abort()
-        }, SUMMARIZE_TIMEOUT_MS)
-
-        try {
+        // For short conversations, skip LLM and embed full content directly
+        // This looks identical to a summary in the UI but avoids API latency
+        if (branch.messages.length <= SKIP_SUMMARIZATION_THRESHOLD) {
+          const quickSummary = formatAsQuickSummary(branch.messages)
+          contextInput = `Context from a side thread "${branch.title}" (summary):\n${quickSummary}`
+        } else {
+          // Longer conversations: use LLM summarization
           const summarizeRes = await fetch("/api/summarize", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -456,28 +474,16 @@ function UnifiedDemoContent() {
                 text: m.text,
               })),
             }),
-            signal: abortController.signal,
           })
-
-          clearTimeout(timeoutId)
 
           const summarizeData = await summarizeRes.json()
 
           if (!summarizeRes.ok) {
-            if (summarizeData.timeout) {
-              throw new Error("Summarization timed out")
-            }
             throw new Error(summarizeData.error || "Failed to summarize")
           }
 
           const summary = (summarizeData as SummarizeResponse).summary
           contextInput = `Context from a side thread "${branch.title}" (summary):\n${summary}`
-        } catch (error) {
-          clearTimeout(timeoutId)
-          if (error instanceof Error && error.name === "AbortError") {
-            throw new Error("Summarization timed out")
-          }
-          throw error
         }
       } else {
         const transcript = branch.messages
