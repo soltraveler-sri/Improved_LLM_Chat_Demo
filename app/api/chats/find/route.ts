@@ -56,6 +56,13 @@ const DEFAULT_MAX_CANDIDATES = 30
 const DEFAULT_TOPK = 5
 const MAX_CANDIDATES_CAP = 60
 
+/**
+ * Minimum confidence threshold for returning results.
+ * Results below this threshold are filtered out.
+ * 0.6 = "Good Match" threshold (matches finder-option-card.tsx display logic)
+ */
+const MIN_CONFIDENCE_THRESHOLD = 0.6
+
 // ---------------------------------------------------------------------------
 // Lexical scoring for candidate generation
 // ---------------------------------------------------------------------------
@@ -157,16 +164,19 @@ Here are the candidate chats to consider:
 ${candidateList}
 
 Your task:
-1. Analyze which chats best match what the user is looking for
-2. Return the top ${topK} most relevant matches (or fewer if there aren't enough good matches)
+1. Analyze which chats match what the user is looking for
+2. Return ONLY chats that are clearly relevant (confidence >= 0.6)
 3. For each match, provide:
    - chatId: the ID from [ID: xxx]
-   - confidence: a score from 0 to 1 indicating how well it matches
-   - why: a single short sentence explaining why this chat matches
+   - confidence: score from 0 to 1 (only include if >= 0.6)
+   - why: one short sentence explaining the match
 
-Order results by relevance (best match first).
-If none of the candidates seem relevant to the query, return an empty results array.
-Be selective—only include chats that genuinely seem to match what the user is looking for.`
+IMPORTANT - Be highly selective:
+- confidence >= 0.85: Strong, clear match to the query
+- confidence 0.6-0.84: Good match with relevant content
+- confidence < 0.6: Do NOT include these results
+
+Return empty results array if no chats clearly match. Do not include weak or tangential matches.`
 }
 
 // ---------------------------------------------------------------------------
@@ -290,7 +300,13 @@ export async function POST(request: NextRequest) {
     // Sort by confidence desc (should already be, but ensure)
     options.sort((a, b) => b.confidence - a.confidence)
 
-    const response: FindResponse = { query, options }
+    // Filter out low-confidence results (below "Good Match" threshold)
+    // This prevents showing "Possible Match" results that clutter the UI
+    const filteredOptions = options.filter(
+      (opt) => opt.confidence >= MIN_CONFIDENCE_THRESHOLD
+    )
+
+    const response: FindResponse = { query, options: filteredOptions }
     return NextResponse.json(response)
   } catch (error) {
     console.error("[POST /api/chats/find] Error:", error)

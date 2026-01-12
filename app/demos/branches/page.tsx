@@ -286,10 +286,10 @@ export default function BranchesDemo() {
   }
 
   /**
-   * Client-side timeout for summarization (30 seconds)
+   * Client-side timeout for summarization (15 seconds)
    * This ensures UI is never stuck if server hangs
    */
-  const SUMMARIZE_TIMEOUT_MS = 30_000
+  const SUMMARIZE_TIMEOUT_MS = 15_000
 
   // Perform merge operation: summarize or full transcript injection
   const performMerge = async (
