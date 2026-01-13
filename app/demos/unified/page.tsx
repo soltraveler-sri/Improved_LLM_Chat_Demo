@@ -211,6 +211,13 @@ function UnifiedDemoContent() {
   const isIngestingRef = useRef(false)
   // Track pending ingestion promise so we can await it before sending messages
   const pendingIngestionRef = useRef<Promise<void> | null>(null)
+  // Store pending branch context to prepend to next user message (avoids slow LLM call)
+  const pendingBranchContextRef = useRef<{
+    contextInput: string
+    branchId: string
+    branchTitle: string
+    mergeType: "summary" | "full"
+  } | null>(null)
 
   // ==========================================================================
   // FIND STATE
@@ -450,21 +457,26 @@ function UnifiedDemoContent() {
     return lines.join("\n")
   }
 
+  /**
+   * Perform branch merge - NO LLM call, just formats context for next message
+   * The context will be prepended to the user's next message automatically
+   */
   const performMerge = async (
     branch: BranchThread,
     mergeMode: "summary" | "full"
-  ): Promise<{ contextText: string; newResponseId: string } | null> => {
+  ): Promise<{ contextText: string; contextInput: string } | null> => {
     try {
       let contextInput: string
+      let displayText: string
 
       if (mergeMode === "summary") {
         // For short conversations, skip LLM and embed full content directly
-        // This looks identical to a summary in the UI but avoids API latency
         if (branch.messages.length <= SKIP_SUMMARIZATION_THRESHOLD) {
           const quickSummary = formatAsQuickSummary(branch.messages)
-          contextInput = `Context from a side thread "${branch.title}" (summary):\n${quickSummary}`
+          contextInput = `Context from branch "${branch.title}":\n${quickSummary}`
+          displayText = quickSummary
         } else {
-          // Longer conversations: use LLM summarization
+          // Longer conversations: use LLM summarization (only this part uses API)
           const summarizeRes = await fetch("/api/summarize", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -483,41 +495,28 @@ function UnifiedDemoContent() {
           }
 
           const summary = (summarizeData as SummarizeResponse).summary
-          contextInput = `Context from a side thread "${branch.title}" (summary):\n${summary}`
+          contextInput = `Context from branch "${branch.title}":\n${summary}`
+          displayText = summary
         }
       } else {
         const transcript = branch.messages
           .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.text}`)
           .join("\n\n")
-        contextInput = `Context from a side thread "${branch.title}" (full transcript):\n${transcript}`
+        contextInput = `Context from branch "${branch.title}" (full):\n${transcript}`
+        displayText = `Full transcript from "${branch.title}"`
       }
 
-      // Ingest into main chain
-      const respondRes = await fetch("/api/respond", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          input: contextInput,
-          previous_response_id: state.lastResponseId,
-          mode: "deep",
-        }),
-      })
-
-      const respondData = await respondRes.json()
-
-      if (!respondRes.ok) {
-        throw new Error(respondData.error || "Failed to ingest context")
+      // Store context for next message instead of calling LLM now
+      pendingBranchContextRef.current = {
+        contextInput,
+        branchId: branch.id,
+        branchTitle: branch.title,
+        mergeType: mergeMode,
       }
 
       return {
-        contextText:
-          mergeMode === "summary"
-            ? contextInput.replace(
-                `Context from a side thread "${branch.title}" (summary):\n`,
-                ""
-              )
-            : `Full transcript from "${branch.title}" merged`,
-        newResponseId: respondData.id,
+        contextText: displayText,
+        contextInput,
       }
     } catch (error) {
       console.error("Merge error:", error)
@@ -787,10 +786,20 @@ function UnifiedDemoContent() {
       await pendingIngestionRef.current
     }
 
+    // Check for pending branch context to prepend
+    const pendingContext = pendingBranchContextRef.current
+    let actualInput = userText
+    if (pendingContext) {
+      // Prepend the context to the user's message for the LLM
+      actualInput = `${pendingContext.contextInput}\n\n---\n\nUser message: ${userText}`
+      // Clear the pending context
+      pendingBranchContextRef.current = null
+    }
+
     const userMessage: UnifiedMessage = {
       localId: generateId(),
       role: "user",
-      text: userText,
+      text: userText, // Show original text to user
       createdAt: Date.now(),
     }
 
@@ -823,11 +832,12 @@ function UnifiedDemoContent() {
     }
 
     try {
+      // Send with prepended context if any
       const res = await fetch("/api/respond", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          input: userText,
+          input: actualInput,
           previous_response_id: state.lastResponseId,
           mode: "deep",
         }),
@@ -943,9 +953,10 @@ function UnifiedDemoContent() {
           },
         }
 
+        // Add context message to UI immediately (no LLM call needed)
         setState((prev) => ({
+          ...prev,
           messages: [...prev.messages, contextMessage],
-          lastResponseId: mergeResult.newResponseId,
         }))
 
         // Persist context message
@@ -955,9 +966,6 @@ function UnifiedDemoContent() {
             role: contextMessage.role,
             text: contextMessage.text,
             createdAt: contextMessage.createdAt,
-          })
-          updateStoredThread(storedThreadIdRef.current, {
-            lastResponseId: mergeResult.newResponseId,
           })
         }
 
@@ -983,11 +991,9 @@ function UnifiedDemoContent() {
         })
 
         toast.success(
-          mergeMode === "summary"
-            ? "Branch merged into main (summary)"
-            : "Branch merged into main (full transcript)",
+          "Branch context added",
           {
-            description: `Context from "${branch.title}" is now available in the main chat.`,
+            description: `Context from "${branch.title}" will be included in your next message.`,
           }
         )
       }
@@ -1114,6 +1120,7 @@ function UnifiedDemoContent() {
     ingestedTaskIdsRef.current.clear()
     lastResponseIdRef.current = null
     pendingIngestionRef.current = null
+    pendingBranchContextRef.current = null
     toast.success("Chat cleared")
   }
 
@@ -1297,25 +1304,19 @@ function UnifiedDemoContent() {
           onUpdateBranch={handleUpdateBranch}
         />
 
-        {/* Merging overlay */}
+        {/* Merging overlay - only shown during LLM summarization for longer branches */}
         {isMerging && (
           <div className="fixed inset-0 bg-background/50 backdrop-blur-sm flex items-center justify-center z-50">
             <div className="bg-card border border-border rounded-xl p-6 shadow-xl flex flex-col items-center gap-4 min-w-[280px]">
-              <Loader2 className="h-10 w-10 text-primary animate-spin" />
+              <Loader2 className="h-8 w-8 text-primary animate-spin" />
               <div className="text-center space-y-1">
                 <h3 className="text-sm font-medium text-foreground">
-                  Adding to main context
+                  Preparing branch context
                 </h3>
                 <p className="text-xs text-muted-foreground">
-                  Merging branch into main conversation...
+                  Summarizing conversation...
                 </p>
               </div>
-              <div className="w-full h-1 bg-muted rounded-full overflow-hidden">
-                <div className="h-full w-1/2 bg-gradient-to-r from-transparent via-primary/50 to-transparent animate-shimmer" />
-              </div>
-              <p className="text-[10px] text-muted-foreground/60">
-                Usually takes 5-10 seconds
-              </p>
             </div>
           </div>
         )}
