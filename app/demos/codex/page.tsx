@@ -424,6 +424,9 @@ export default function CodexDemoPage() {
         })
       }
     } catch (error) {
+      if (error instanceof Error && error.message === "CHAIN_RESET_RETRY_FAILED") {
+        return
+      }
       const errorMessage =
         error instanceof Error ? error.message : "Something went wrong"
       toast.error(errorMessage)
