@@ -97,13 +97,15 @@ export default function CodexDemoPage() {
   const ingestedTaskIdsRef = useRef<Set<string>>(new Set())
   const isIngestingRef = useRef(false)
   const lastResponseIdRef = useRef<string | null>(null)
-  // Track pending ingestion promise so we can await it before sending messages
-  const pendingIngestionRef = useRef<Promise<void> | null>(null)
-  
-  // Keep ref in sync with state for use in async operations
-  useEffect(() => {
-    lastResponseIdRef.current = lastResponseId
-  }, [lastResponseId])
+  const chainQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const enqueueChain = useCallback(<T,>(operation: () => Promise<T>) => {
+    const queued = chainQueueRef.current.then(operation, operation)
+    chainQueueRef.current = queued.then(
+      () => undefined,
+      () => undefined
+    )
+    return queued
+  }, [])
 
   // Fetch initial workspace
   useEffect(() => {
@@ -123,43 +125,50 @@ export default function CodexDemoPage() {
 
   // Ingest a completed task's context into the chat chain
   // This makes the chat truly stateful - the model will remember task outputs
-  const ingestTaskContext = useCallback(async (task: CodexTask) => {
-    const contextInput = buildTaskContextInput(task)
-    if (!contextInput) return
+  const ingestTaskContext = useCallback(
+    (task: CodexTask) => {
+      const contextInput = buildTaskContextInput(task)
+      if (!contextInput) return Promise.resolve()
 
-    try {
-      // Use ref to get the current chain ID (important for sequential ingestion)
-      const currentResponseId = lastResponseIdRef.current
-      
-      const res = await fetch("/api/respond", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          input: contextInput,
-          previous_response_id: currentResponseId,
-          mode: "deep",
-        }),
+      return enqueueChain(async () => {
+        try {
+          // Use ref to get the current chain ID (important for sequential ingestion)
+          const currentResponseId = lastResponseIdRef.current
+
+          const res = await fetch("/api/respond", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              input: contextInput,
+              previous_response_id: currentResponseId,
+              mode: "deep",
+            }),
+          })
+
+          const data = await res.json()
+
+          if (!res.ok) {
+            console.error("Failed to ingest task context:", data.error)
+            return
+          }
+
+          // Update both ref (immediately) and state (for UI/chain)
+          // This ensures sequential ingestions use the correct chain ID
+          lastResponseIdRef.current = data.id
+          setLastResponseId(data.id)
+
+          if (process.env.NODE_ENV === "development") {
+            console.log(
+              `[Codex:ingest] Task "${task.id.slice(0, 8)}..." ingested into chain, new responseId: ${data.id?.slice(0, 12)}...`
+            )
+          }
+        } catch (error) {
+          console.error("Failed to ingest task context:", error)
+        }
       })
-
-      const data = await res.json()
-
-      if (!res.ok) {
-        console.error("Failed to ingest task context:", data.error)
-        return
-      }
-
-      // Update both ref (immediately) and state (for UI/chain)
-      // This ensures sequential ingestions use the correct chain ID
-      lastResponseIdRef.current = data.id
-      setLastResponseId(data.id)
-      
-      if (process.env.NODE_ENV === "development") {
-        console.log(`[Codex:ingest] Task "${task.id.slice(0, 8)}..." ingested into chain, new responseId: ${data.id?.slice(0, 12)}...`)
-      }
-    } catch (error) {
-      console.error("Failed to ingest task context:", error)
-    }
-  }, [])
+    },
+    [enqueueChain]
+  )
 
   // Watch for completed tasks and ingest them into the chat chain
   // This runs after each task state update to check for newly completed tasks
@@ -224,6 +233,9 @@ export default function CodexDemoPage() {
   // Refresh a task - returns the refreshed task for synchronous ingestion
   const refreshTask = async (taskId: string): Promise<CodexTask | null> => {
     try {
+      if (taskId.startsWith("placeholder_")) {
+        return null
+      }
       const res = await fetch(`/api/codex/tasks/${taskId}`)
       if (res.ok) {
         const data = await res.json()
@@ -364,15 +376,13 @@ export default function CodexDemoPage() {
         // Re-enable input immediately so user doesn't see "..." after task completes
         setIsLoading(false)
 
-        // Start ingestion in background - track with ref so regular chat can await if needed
-        // This prevents the race condition while avoiding the visible "..." indicator
-        if (taskForIngestion.contextSummary && !ingestedTaskIdsRef.current.has(taskForIngestion.id)) {
+        // Start ingestion in background (serialized via chain queue)
+        if (
+          taskForIngestion.contextSummary &&
+          !ingestedTaskIdsRef.current.has(taskForIngestion.id)
+        ) {
           ingestedTaskIdsRef.current.add(taskForIngestion.id)
-
-          const ingestionPromise = ingestTaskContext(taskForIngestion).finally(() => {
-            pendingIngestionRef.current = null
-          })
-          pendingIngestionRef.current = ingestionPromise
+          ingestTaskContext(taskForIngestion)
 
           if (process.env.NODE_ENV === "development") {
             console.log(
@@ -381,39 +391,37 @@ export default function CodexDemoPage() {
           }
         }
       } else {
-        // Await any pending task context ingestion before sending regular chat
-        // This prevents race condition where model doesn't see recent task context
-        if (pendingIngestionRef.current) {
-          await pendingIngestionRef.current
-        }
-        // Regular chat message - send to /api/respond
-        // Context from completed tasks is already in the chain via ingestion,
-        // so we just send the user's message directly
-        const res = await fetch("/api/respond", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            input: text,
-            previous_response_id: lastResponseId,
-            mode: "deep",
-          }),
+        await enqueueChain(async () => {
+          // Regular chat message - send to /api/respond
+          // Context from completed tasks is already in the chain via ingestion,
+          // so we just send the user's message directly
+          const res = await fetch("/api/respond", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              input: text,
+              previous_response_id: lastResponseIdRef.current,
+              mode: "deep",
+            }),
+          })
+
+          const data = await res.json()
+
+          if (!res.ok) {
+            throw new Error(data.error || "Failed to get response")
+          }
+
+          // Add assistant message
+          const assistantMessage: ChatMessage = {
+            id: generateId(),
+            type: "assistant",
+            text: data.output_text,
+            createdAt: Date.now(),
+          }
+          lastResponseIdRef.current = data.id
+          setLastResponseId(data.id)
+          setMessages((prev) => [...prev, assistantMessage])
         })
-
-        const data = await res.json()
-
-        if (!res.ok) {
-          throw new Error(data.error || "Failed to get response")
-        }
-
-        // Add assistant message
-        const assistantMessage: ChatMessage = {
-          id: generateId(),
-          type: "assistant",
-          text: data.output_text,
-          createdAt: Date.now(),
-        }
-        setMessages((prev) => [...prev, assistantMessage])
-        setLastResponseId(data.id)
       }
     } catch (error) {
       const errorMessage =
@@ -442,7 +450,7 @@ export default function CodexDemoPage() {
     lastResponseIdRef.current = null
     setInputValue("")
     ingestedTaskIdsRef.current.clear()
-    pendingIngestionRef.current = null
+    chainQueueRef.current = Promise.resolve()
     toast.success("Chat cleared")
   }
 

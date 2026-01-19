@@ -190,9 +190,15 @@ function UnifiedDemoContent() {
 
   // Ref for async operations to get current chain ID
   const lastResponseIdRef = useRef<string | null>(null)
-  useEffect(() => {
-    lastResponseIdRef.current = state.lastResponseId
-  }, [state.lastResponseId])
+  const chainQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const enqueueChain = useCallback(<T,>(operation: () => Promise<T>) => {
+    const queued = chainQueueRef.current.then(operation, operation)
+    chainQueueRef.current = queued.then(
+      () => undefined,
+      () => undefined
+    )
+    return queued
+  }, [])
 
   // ==========================================================================
   // BRANCH STATE
@@ -209,8 +215,6 @@ function UnifiedDemoContent() {
   const [workspace, setWorkspace] = useState<WorkspaceSnapshot | null>(null)
   const ingestedTaskIdsRef = useRef<Set<string>>(new Set())
   const isIngestingRef = useRef(false)
-  // Track pending ingestion promise so we can await it before sending messages
-  const pendingIngestionRef = useRef<Promise<void> | null>(null)
   // Store pending branch context to prepend to next user message (avoids slow LLM call)
   const pendingBranchContextRef = useRef<{
     contextInput: string
@@ -340,6 +344,7 @@ function UnifiedDemoContent() {
             messages: loadedMessages,
             lastResponseId: thread.lastResponseId || null,
           })
+          lastResponseIdRef.current = thread.lastResponseId || null
 
           storedThreadIdRef.current = thread.id
 
@@ -360,46 +365,57 @@ function UnifiedDemoContent() {
   // ==========================================================================
 
   // Ingest a completed task's context into the chat chain
-  const ingestTaskContext = useCallback(async (task: CodexTask) => {
-    const contextInput = buildTaskContextInput(task)
-    if (!contextInput) return
+  const ingestTaskContext = useCallback(
+    (task: CodexTask) => {
+      const contextInput = buildTaskContextInput(task)
+      if (!contextInput) return Promise.resolve()
 
-    try {
-      const currentResponseId = lastResponseIdRef.current
+      return enqueueChain(async () => {
+        try {
+          const currentResponseId = lastResponseIdRef.current
 
-      const res = await fetch("/api/respond", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          input: contextInput,
-          previous_response_id: currentResponseId,
-          mode: "deep",
-        }),
+          const res = await fetch("/api/respond", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              input: contextInput,
+              previous_response_id: currentResponseId,
+              mode: "deep",
+            }),
+          })
+
+          const data = await res.json()
+
+          if (!res.ok) {
+            console.error("Failed to ingest task context:", data.error)
+            return
+          }
+
+          // Update both ref (immediately) and state
+          lastResponseIdRef.current = data.id
+          setState((prev) => ({
+            ...prev,
+            lastResponseId: data.id,
+          }))
+
+          if (storedThreadIdRef.current) {
+            updateStoredThread(storedThreadIdRef.current, {
+              lastResponseId: data.id,
+            })
+          }
+
+          if (process.env.NODE_ENV === "development") {
+            console.log(
+              `[Unified:ingest] Task "${task.id.slice(0, 8)}..." ingested into chain`
+            )
+          }
+        } catch (error) {
+          console.error("Failed to ingest task context:", error)
+        }
       })
-
-      const data = await res.json()
-
-      if (!res.ok) {
-        console.error("Failed to ingest task context:", data.error)
-        return
-      }
-
-      // Update both ref (immediately) and state
-      lastResponseIdRef.current = data.id
-      setState((prev) => ({
-        ...prev,
-        lastResponseId: data.id,
-      }))
-
-      if (process.env.NODE_ENV === "development") {
-        console.log(
-          `[Unified:ingest] Task "${task.id.slice(0, 8)}..." ingested into chain`
-        )
-      }
-    } catch (error) {
-      console.error("Failed to ingest task context:", error)
-    }
-  }, [])
+    },
+    [enqueueChain]
+  )
 
   // Watch for completed tasks and ingest them
   useEffect(() => {
@@ -616,7 +632,7 @@ function UnifiedDemoContent() {
       // Save current chat state before navigating (if there are messages)
       if (state.messages.length > 0 && storedThreadIdRef.current) {
         updateStoredThread(storedThreadIdRef.current, {
-          lastResponseId: state.lastResponseId,
+          lastResponseId: lastResponseIdRef.current,
         })
       }
 
@@ -754,15 +770,13 @@ function UnifiedDemoContent() {
       // Re-enable input immediately so user doesn't see "..." after task completes
       setIsLoading(false)
 
-      // Start ingestion in background - track with ref so handleRegularChat can await if needed
-      // This prevents the race condition while avoiding the visible "..." indicator
-      if (taskForIngestion.contextSummary && !ingestedTaskIdsRef.current.has(taskForIngestion.id)) {
+      // Start ingestion in background (serialized via chain queue)
+      if (
+        taskForIngestion.contextSummary &&
+        !ingestedTaskIdsRef.current.has(taskForIngestion.id)
+      ) {
         ingestedTaskIdsRef.current.add(taskForIngestion.id)
-
-        const ingestionPromise = ingestTaskContext(taskForIngestion).finally(() => {
-          pendingIngestionRef.current = null
-        })
-        pendingIngestionRef.current = ingestionPromise
+        ingestTaskContext(taskForIngestion)
 
         if (process.env.NODE_ENV === "development") {
           console.log(
@@ -780,12 +794,6 @@ function UnifiedDemoContent() {
 
   // Handle regular chat message
   const handleRegularChat = async (userText: string) => {
-    // Await any pending task context ingestion before sending
-    // This prevents race condition where model doesn't see recent task context
-    if (pendingIngestionRef.current) {
-      await pendingIngestionRef.current
-    }
-
     // Check for pending branch context to prepend
     const pendingContext = pendingBranchContextRef.current
     let actualInput = userText
@@ -832,51 +840,55 @@ function UnifiedDemoContent() {
     }
 
     try {
-      // Send with prepended context if any
-      const res = await fetch("/api/respond", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          input: actualInput,
-          previous_response_id: state.lastResponseId,
-          mode: "deep",
-        }),
-      })
-
-      const data = await res.json()
-
-      if (!res.ok) {
-        throw new Error(data.error || "Failed to get response")
-      }
-
-      const responseData = data as RespondResponse
-
-      const assistantMessage: UnifiedMessage = {
-        localId: generateId(),
-        role: "assistant",
-        text: responseData.output_text,
-        createdAt: Date.now(),
-        responseId: responseData.id,
-      }
-
-      setState((prev) => ({
-        messages: [...prev.messages, assistantMessage],
-        lastResponseId: responseData.id,
-      }))
-
-      // Persist assistant message
-      if (storedThreadIdRef.current) {
-        persistMessage(storedThreadIdRef.current, {
-          id: assistantMessage.localId,
-          role: assistantMessage.role,
-          text: assistantMessage.text,
-          createdAt: assistantMessage.createdAt,
-          responseId: assistantMessage.responseId,
+      await enqueueChain(async () => {
+        // Send with prepended context if any
+        const res = await fetch("/api/respond", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            input: actualInput,
+            previous_response_id: lastResponseIdRef.current,
+            mode: "deep",
+          }),
         })
-        updateStoredThread(storedThreadIdRef.current, {
+
+        const data = await res.json()
+
+        if (!res.ok) {
+          throw new Error(data.error || "Failed to get response")
+        }
+
+        const responseData = data as RespondResponse
+
+        const assistantMessage: UnifiedMessage = {
+          localId: generateId(),
+          role: "assistant",
+          text: responseData.output_text,
+          createdAt: Date.now(),
+          responseId: responseData.id,
+        }
+
+        lastResponseIdRef.current = responseData.id
+        setState((prev) => ({
+          ...prev,
+          messages: [...prev.messages, assistantMessage],
           lastResponseId: responseData.id,
-        })
-      }
+        }))
+
+        // Persist assistant message
+        if (storedThreadIdRef.current) {
+          persistMessage(storedThreadIdRef.current, {
+            id: assistantMessage.localId,
+            role: assistantMessage.role,
+            text: assistantMessage.text,
+            createdAt: assistantMessage.createdAt,
+            responseId: assistantMessage.responseId,
+          })
+          updateStoredThread(storedThreadIdRef.current, {
+            lastResponseId: responseData.id,
+          })
+        }
+      })
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : "Something went wrong"
@@ -1051,6 +1063,9 @@ function UnifiedDemoContent() {
   // Returns the refreshed task so callers can use it for synchronous ingestion
   const refreshTask = async (taskId: string): Promise<CodexTask | null> => {
     try {
+      if (taskId.startsWith("placeholder_")) {
+        return null
+      }
       const res = await fetch(`/api/codex/tasks/${taskId}`)
       if (res.ok) {
         const data = await res.json()
@@ -1119,8 +1134,8 @@ function UnifiedDemoContent() {
     storedThreadIdRef.current = null
     ingestedTaskIdsRef.current.clear()
     lastResponseIdRef.current = null
-    pendingIngestionRef.current = null
     pendingBranchContextRef.current = null
+    chainQueueRef.current = Promise.resolve()
     toast.success("Chat cleared")
   }
 
