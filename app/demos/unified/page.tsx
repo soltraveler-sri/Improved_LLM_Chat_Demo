@@ -237,6 +237,122 @@ function UnifiedDemoContent() {
   const storedThreadIdRef = useRef<string | null>(null)
 
   // ==========================================================================
+  // CHAIN RECOVERY + OBSERVABILITY
+  // ==========================================================================
+  const resetChain = useCallback(() => {
+    lastResponseIdRef.current = null
+    setState((prev) => ({
+      ...prev,
+      lastResponseId: null,
+    }))
+    if (storedThreadIdRef.current) {
+      updateStoredThread(storedThreadIdRef.current, {
+        lastResponseId: null,
+      })
+    }
+  }, [])
+
+  const logRespondCall = useCallback(
+    (params: {
+      source: "ingestion" | "user"
+      previousResponseId: string | null
+      newResponseId: string | null
+      status: number
+      didRetry: boolean
+    }) => {
+      if (process.env.NODE_ENV !== "development") return
+      const prevPreview = params.previousResponseId
+        ? params.previousResponseId.slice(0, 8)
+        : "none"
+      const nextPreview = params.newResponseId
+        ? params.newResponseId.slice(0, 8)
+        : "none"
+      const retryLabel = params.didRetry ? " retry" : ""
+      console.log(
+        `[Respond][Unified][${params.source}] prev=${prevPreview} new=${nextPreview} status=${params.status}${retryLabel}`
+      )
+    },
+    []
+  )
+
+  const isChainBrokenResponse = useCallback(
+    (status: number, payload?: { code?: string; message?: string; error?: string }) => {
+      if (status === 409 && payload?.code === "chain_broken") return true
+      const message = `${payload?.message ?? ""} ${payload?.error ?? ""}`.toLowerCase()
+      return message.includes("previous_response_not_found")
+    },
+    []
+  )
+
+  const respondWithRetry = useCallback(
+    async ({
+      input,
+      mode,
+      source,
+    }: {
+      input: string
+      mode: "fast" | "deep"
+      source: "ingestion" | "user"
+    }): Promise<RespondResponse> => {
+      const attempt = async (
+        previousResponseId: string | null,
+        didRetry: boolean
+      ): Promise<RespondResponse> => {
+        const body: {
+          input: string
+          mode: "fast" | "deep"
+          previous_response_id?: string | null
+        } = { input, mode }
+        if (previousResponseId) {
+          body.previous_response_id = previousResponseId
+        }
+
+        const res = await fetch("/api/respond", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        })
+
+        let data: RespondResponse | { code?: string; message?: string; error?: string }
+        try {
+          data = await res.json()
+        } catch {
+          data = {}
+        }
+
+        logRespondCall({
+          source,
+          previousResponseId,
+          newResponseId: res.ok ? (data as RespondResponse).id : null,
+          status: res.status,
+          didRetry,
+        })
+
+        if (res.ok) {
+          return data as RespondResponse
+        }
+
+        const payload = data as { code?: string; message?: string; error?: string }
+        if (isChainBrokenResponse(res.status, payload)) {
+          resetChain()
+          if (!didRetry) {
+            const retryResult = await attempt(null, true)
+            toast.info("Chain reset; continuing")
+            return retryResult
+          }
+          toast.error("Chain reset; please retry")
+          throw new Error("CHAIN_RESET_RETRY_FAILED")
+        }
+
+        throw new Error(payload.error || payload.message || "Failed to get response")
+      }
+
+      return attempt(lastResponseIdRef.current, false)
+    },
+    [isChainBrokenResponse, logRespondCall, resetChain]
+  )
+
+  // ==========================================================================
   // UI REFS
   // ==========================================================================
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -372,35 +488,22 @@ function UnifiedDemoContent() {
 
       return enqueueChain(async () => {
         try {
-          const currentResponseId = lastResponseIdRef.current
-
-          const res = await fetch("/api/respond", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              input: contextInput,
-              previous_response_id: currentResponseId,
-              mode: "deep",
-            }),
+          const responseData = await respondWithRetry({
+            input: contextInput,
+            mode: "deep",
+            source: "ingestion",
           })
 
-          const data = await res.json()
-
-          if (!res.ok) {
-            console.error("Failed to ingest task context:", data.error)
-            return
-          }
-
           // Update both ref (immediately) and state
-          lastResponseIdRef.current = data.id
+          lastResponseIdRef.current = responseData.id
           setState((prev) => ({
             ...prev,
-            lastResponseId: data.id,
+            lastResponseId: responseData.id,
           }))
 
           if (storedThreadIdRef.current) {
             updateStoredThread(storedThreadIdRef.current, {
-              lastResponseId: data.id,
+              lastResponseId: responseData.id,
             })
           }
 
@@ -414,7 +517,7 @@ function UnifiedDemoContent() {
         }
       })
     },
-    [enqueueChain]
+    [enqueueChain, respondWithRetry]
   )
 
   // Watch for completed tasks and ingest them
@@ -841,24 +944,11 @@ function UnifiedDemoContent() {
 
     try {
       await enqueueChain(async () => {
-        // Send with prepended context if any
-        const res = await fetch("/api/respond", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            input: actualInput,
-            previous_response_id: lastResponseIdRef.current,
-            mode: "deep",
-          }),
+        const responseData = await respondWithRetry({
+          input: actualInput,
+          mode: "deep",
+          source: "user",
         })
-
-        const data = await res.json()
-
-        if (!res.ok) {
-          throw new Error(data.error || "Failed to get response")
-        }
-
-        const responseData = data as RespondResponse
 
         const assistantMessage: UnifiedMessage = {
           localId: generateId(),
@@ -890,6 +980,9 @@ function UnifiedDemoContent() {
         }
       })
     } catch (error) {
+      if (error instanceof Error && error.message === "CHAIN_RESET_RETRY_FAILED") {
+        return
+      }
       const errorMessage =
         error instanceof Error ? error.message : "Something went wrong"
       toast.error(errorMessage)
