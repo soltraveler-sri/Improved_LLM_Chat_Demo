@@ -488,22 +488,35 @@ function UnifiedDemoContent() {
 
       return enqueueChain(async () => {
         try {
-          const responseData = await respondWithRetry({
-            input: contextInput,
-            mode: "deep",
-            source: "ingestion",
+          const currentResponseId = lastResponseIdRef.current
+
+          const res = await fetch("/api/respond", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              input: contextInput,
+              previous_response_id: currentResponseId,
+              mode: "deep",
+            }),
           })
 
+          const data = await res.json()
+
+          if (!res.ok) {
+            console.error("Failed to ingest task context:", data.error)
+            return
+          }
+
           // Update both ref (immediately) and state
-          lastResponseIdRef.current = responseData.id
+          lastResponseIdRef.current = data.id
           setState((prev) => ({
             ...prev,
-            lastResponseId: responseData.id,
+            lastResponseId: data.id,
           }))
 
           if (storedThreadIdRef.current) {
             updateStoredThread(storedThreadIdRef.current, {
-              lastResponseId: responseData.id,
+              lastResponseId: data.id,
             })
           }
 
@@ -517,7 +530,7 @@ function UnifiedDemoContent() {
         }
       })
     },
-    [enqueueChain, respondWithRetry]
+    [enqueueChain]
   )
 
   // Watch for completed tasks and ingest them
@@ -944,11 +957,24 @@ function UnifiedDemoContent() {
 
     try {
       await enqueueChain(async () => {
-        const responseData = await respondWithRetry({
-          input: actualInput,
-          mode: "deep",
-          source: "user",
+        // Send with prepended context if any
+        const res = await fetch("/api/respond", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            input: actualInput,
+            previous_response_id: lastResponseIdRef.current,
+            mode: "deep",
+          }),
         })
+
+        const data = await res.json()
+
+        if (!res.ok) {
+          throw new Error(data.error || "Failed to get response")
+        }
+
+        const responseData = data as RespondResponse
 
         const assistantMessage: UnifiedMessage = {
           localId: generateId(),

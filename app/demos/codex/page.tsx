@@ -107,110 +107,6 @@ export default function CodexDemoPage() {
     return queued
   }, [])
 
-  const resetChain = useCallback(() => {
-    lastResponseIdRef.current = null
-    setLastResponseId(null)
-  }, [])
-
-  const logRespondCall = useCallback(
-    (params: {
-      source: "ingestion" | "user"
-      previousResponseId: string | null
-      newResponseId: string | null
-      status: number
-      didRetry: boolean
-    }) => {
-      if (process.env.NODE_ENV !== "development") return
-      const prevPreview = params.previousResponseId
-        ? params.previousResponseId.slice(0, 8)
-        : "none"
-      const nextPreview = params.newResponseId
-        ? params.newResponseId.slice(0, 8)
-        : "none"
-      const retryLabel = params.didRetry ? " retry" : ""
-      console.log(
-        `[Respond][Codex][${params.source}] prev=${prevPreview} new=${nextPreview} status=${params.status}${retryLabel}`
-      )
-    },
-    []
-  )
-
-  const isChainBrokenResponse = useCallback(
-    (status: number, payload?: { code?: string; message?: string; error?: string }) => {
-      if (status === 409 && payload?.code === "chain_broken") return true
-      const message = `${payload?.message ?? ""} ${payload?.error ?? ""}`.toLowerCase()
-      return message.includes("previous_response_not_found")
-    },
-    []
-  )
-
-  const respondWithRetry = useCallback(
-    async ({
-      input,
-      mode,
-      source,
-    }: {
-      input: string
-      mode: "fast" | "deep"
-      source: "ingestion" | "user"
-    }) => {
-      const attempt = async (
-        previousResponseId: string | null,
-        didRetry: boolean
-      ) => {
-        const body: {
-          input: string
-          mode: "fast" | "deep"
-          previous_response_id?: string | null
-        } = { input, mode }
-        if (previousResponseId) {
-          body.previous_response_id = previousResponseId
-        }
-
-        const res = await fetch("/api/respond", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        })
-
-        let data: { id?: string; output_text?: string; code?: string; message?: string; error?: string }
-        try {
-          data = await res.json()
-        } catch {
-          data = {}
-        }
-
-        logRespondCall({
-          source,
-          previousResponseId,
-          newResponseId: res.ok ? data.id ?? null : null,
-          status: res.status,
-          didRetry,
-        })
-
-        if (res.ok) {
-          return data
-        }
-
-        if (isChainBrokenResponse(res.status, data)) {
-          resetChain()
-          if (!didRetry) {
-            const retryResult = await attempt(null, true)
-            toast.info("Chain reset; continuing")
-            return retryResult
-          }
-          toast.error("Chain reset; please retry")
-          throw new Error("CHAIN_RESET_RETRY_FAILED")
-        }
-
-        throw new Error(data.error || data.message || "Failed to get response")
-      }
-
-      return attempt(lastResponseIdRef.current, false)
-    },
-    [isChainBrokenResponse, logRespondCall, resetChain]
-  )
-
   // Fetch initial workspace
   useEffect(() => {
     async function fetchWorkspace() {
@@ -236,20 +132,34 @@ export default function CodexDemoPage() {
 
       return enqueueChain(async () => {
         try {
-          const responseData = await respondWithRetry({
-            input: contextInput,
-            mode: "deep",
-            source: "ingestion",
+          // Use ref to get the current chain ID (important for sequential ingestion)
+          const currentResponseId = lastResponseIdRef.current
+
+          const res = await fetch("/api/respond", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              input: contextInput,
+              previous_response_id: currentResponseId,
+              mode: "deep",
+            }),
           })
+
+          const data = await res.json()
+
+          if (!res.ok) {
+            console.error("Failed to ingest task context:", data.error)
+            return
+          }
 
           // Update both ref (immediately) and state (for UI/chain)
           // This ensures sequential ingestions use the correct chain ID
-          lastResponseIdRef.current = responseData.id ?? null
-          setLastResponseId(responseData.id ?? null)
+          lastResponseIdRef.current = data.id
+          setLastResponseId(data.id)
 
           if (process.env.NODE_ENV === "development") {
             console.log(
-              `[Codex:ingest] Task "${task.id.slice(0, 8)}..." ingested into chain, new responseId: ${responseData.id?.slice(0, 12)}...`
+              `[Codex:ingest] Task "${task.id.slice(0, 8)}..." ingested into chain, new responseId: ${data.id?.slice(0, 12)}...`
             )
           }
         } catch (error) {
@@ -257,7 +167,7 @@ export default function CodexDemoPage() {
         }
       })
     },
-    [enqueueChain, respondWithRetry]
+    [enqueueChain]
   )
 
   // Watch for completed tasks and ingest them into the chat chain
@@ -482,21 +392,34 @@ export default function CodexDemoPage() {
         }
       } else {
         await enqueueChain(async () => {
-          const responseData = await respondWithRetry({
-            input: text,
-            mode: "deep",
-            source: "user",
+          // Regular chat message - send to /api/respond
+          // Context from completed tasks is already in the chain via ingestion,
+          // so we just send the user's message directly
+          const res = await fetch("/api/respond", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              input: text,
+              previous_response_id: lastResponseIdRef.current,
+              mode: "deep",
+            }),
           })
+
+          const data = await res.json()
+
+          if (!res.ok) {
+            throw new Error(data.error || "Failed to get response")
+          }
 
           // Add assistant message
           const assistantMessage: ChatMessage = {
             id: generateId(),
             type: "assistant",
-            text: responseData.output_text,
+            text: data.output_text,
             createdAt: Date.now(),
           }
-          lastResponseIdRef.current = responseData.id ?? null
-          setLastResponseId(responseData.id ?? null)
+          lastResponseIdRef.current = data.id
+          setLastResponseId(data.id)
           setMessages((prev) => [...prev, assistantMessage])
         })
       }
