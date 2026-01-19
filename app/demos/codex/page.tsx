@@ -349,6 +349,12 @@ export default function CodexDemoPage() {
 
         const task = data.task as CodexTask
 
+        if (process.env.NODE_ENV === "development") {
+          console.log(
+            `[Codex:handleSend] Replacing placeholder task "${placeholderId}" with real task "${task.id}"`
+          )
+        }
+
         // Replace placeholder with real task
         setTasks((prev) => {
           const { [placeholderId]: _, ...rest } = prev
@@ -533,7 +539,7 @@ export default function CodexDemoPage() {
                     if (!task) return null
                     return (
                       <TaskCard
-                        key={message.id}
+                        key={`${message.id}-${message.taskId}`}
                         task={task}
                         workspace={workspace || undefined}
                         onApplyChanges={() => applyTaskChanges(task.id)}

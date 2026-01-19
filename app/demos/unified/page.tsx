@@ -854,6 +854,12 @@ function UnifiedDemoContent() {
 
       const task = data.task as CodexTask
 
+      if (process.env.NODE_ENV === "development") {
+        console.log(
+          `[Unified:handleCodexCommand] Replacing placeholder task "${placeholderId}" with real task "${task.id}"`
+        )
+      }
+
       // Replace placeholder with real task
       setTasks((prev) => {
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -1341,7 +1347,7 @@ function UnifiedDemoContent() {
                   if (!task) return null
                   return (
                     <TaskCard
-                      key={message.localId}
+                      key={`${message.localId}-${message.taskId}`}
                       task={task}
                       workspace={workspace || undefined}
                       onApplyChanges={() => applyTaskChanges(task.id)}

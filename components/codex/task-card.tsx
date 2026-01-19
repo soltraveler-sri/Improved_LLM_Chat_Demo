@@ -485,13 +485,17 @@ function ProgressView({
 
   // Auto-refresh periodically
   useEffect(() => {
+    if (task.id.startsWith("placeholder_")) {
+      return
+    }
+
     const interval = setInterval(() => {
       setIsRefreshing(true)
       onRefresh().finally(() => setIsRefreshing(false))
     }, 3000)
 
     return () => clearInterval(interval)
-  }, [onRefresh])
+  }, [onRefresh, task.id])
 
   // Calculate time-based progress (never completes since component unmounts when task finishes)
   const progress = calculateTimeBasedProgress(elapsedMs, false)
