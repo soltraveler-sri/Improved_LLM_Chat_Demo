@@ -28,12 +28,12 @@ import { zodTextFormat } from "openai/helpers/zod"
  */
 export type RequestKind =
   | "chat_fast" // Fast chat responses (reasoning: low)
-  | "chat_deep" // Deep chat responses (reasoning: medium)
+  | "chat_deep" // Deep chat responses (reasoning: low)
   | "summarize" // Summarization tasks (gpt-5-nano, reasoning: low)
   | "intent" // Intent classification (gpt-5-nano, reasoning: low)
   | "stacks" // Smart Stacks categorization (gpt-5-nano, reasoning: low)
   | "finder" // Chat finder reranking (gpt-5-mini, reasoning: low)
-  | "codex" // Codex tasks (gpt-5.1-codex-mini, reasoning: medium)
+  | "codex" // Codex tasks (gpt-5.1-codex-mini, reasoning: low)
 
 /**
  * Request kinds that use previous_response_id chaining.
@@ -139,7 +139,7 @@ type ReasoningEffort = "minimal" | "low" | "medium" | "high"
  */
 const REASONING_EFFORT: Record<RequestKind, ReasoningEffort> = {
   chat_fast: "low",
-  chat_deep: "high",
+  chat_deep: "low",
   summarize: "minimal", // Use minimal for fastest summarization
   intent: "low",
   stacks: "low",

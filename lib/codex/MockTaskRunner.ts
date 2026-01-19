@@ -247,7 +247,7 @@ function generateUnifiedDiff(
  *
  * Uses the centralized OpenAI client with "codex" request kind:
  * - Model: gpt-5.1-codex-mini (or OPENAI_MODEL_CODEX env var)
- * - Reasoning effort: medium (NOT "none" - that causes 400 errors!)
+ * - Reasoning effort: low (NOT "none" - that causes 400 errors!)
  * - Text verbosity: medium
  */
 export class MockTaskRunner implements TaskRunner {
@@ -282,7 +282,7 @@ export class MockTaskRunner implements TaskRunner {
 
       console.log(`[MockTaskRunner] Starting task ${taskId} with model ${config.model} (reasoning: ${config.reasoning})`)
 
-      // Uses "codex" kind: gpt-5.1-codex-mini with reasoning: medium
+      // Uses "codex" kind: gpt-5.1-codex-mini with reasoning: low
       const { parsed } = await createParsedResponse({
         kind: "codex",
         input: fullPrompt,
