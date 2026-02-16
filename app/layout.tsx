@@ -25,7 +25,7 @@ export default function RootLayout({
         >
           <div className="app-background noise-overlay min-h-screen">
             <div className="relative z-10 min-h-screen flex flex-col">
-              <div className="mx-auto w-full max-w-5xl px-4 py-6 flex-1 flex flex-col">
+              <div className="mx-auto w-full max-w-7xl px-4 py-4 flex-1 flex flex-col">
                 <div className="app-frame flex-1 flex flex-col overflow-hidden">
                   <Nav />
                   <main className="flex-1 overflow-auto">

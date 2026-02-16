@@ -116,7 +116,7 @@ export function TaskCard({
   if (!isExpanded) {
     return (
       <div
-        className="flex items-center gap-3 px-4 py-3 bg-card border border-border rounded-xl cursor-pointer hover:bg-muted/50 transition-colors"
+        className="flex items-center gap-3 px-4 py-3 bg-card border border-border dark:border-muted-foreground/25 rounded-xl cursor-pointer hover:bg-muted/50 transition-colors shadow-sm dark:shadow-md dark:shadow-black/20"
         onClick={() => setIsExpanded(true)}
       >
         <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
@@ -155,9 +155,9 @@ export function TaskCard({
   // =============================================================================
 
   return (
-    <div className="bg-card border border-border rounded-xl overflow-hidden shadow-sm">
+    <div className="bg-card border border-border dark:border-muted-foreground/25 rounded-xl overflow-hidden shadow-sm dark:shadow-md dark:shadow-black/20">
       {/* Sticky Header */}
-      <div className="sticky top-0 z-10 bg-card border-b border-border">
+      <div className="sticky top-0 z-10 bg-card border-b border-border dark:border-muted-foreground/20">
         {/* Title row */}
         <div
           className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-muted/30 transition-colors"
