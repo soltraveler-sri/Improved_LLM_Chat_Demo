@@ -9,6 +9,8 @@ import {
   Search,
   Sparkles,
   Zap,
+  Plus,
+  MessageSquare,
 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
@@ -31,7 +33,8 @@ import type {
   SummarizeResponse,
 } from "@/lib/types"
 import type { CodexTask, WorkspaceSnapshot } from "@/lib/codex/types"
-import type { StoredChatThread } from "@/lib/store/types"
+import type { StoredChatThread, StoredChatThreadMeta } from "@/lib/store/types"
+import { ScrollArea } from "@/components/ui/scroll-area"
 
 // =============================================================================
 // HELPERS
@@ -237,6 +240,12 @@ function UnifiedDemoContent() {
   const storedThreadIdRef = useRef<string | null>(null)
 
   // ==========================================================================
+  // SIDEBAR STATE
+  // ==========================================================================
+  const [threads, setThreads] = useState<StoredChatThreadMeta[]>([])
+  const [isLoadingThreads, setIsLoadingThreads] = useState(true)
+
+  // ==========================================================================
   // CHAIN RECOVERY + OBSERVABILITY
   // ==========================================================================
   const resetChain = useCallback(() => {
@@ -249,6 +258,21 @@ function UnifiedDemoContent() {
       updateStoredThread(storedThreadIdRef.current, {
         lastResponseId: null,
       })
+    }
+  }, [])
+
+  // Fetch threads for sidebar
+  const fetchThreads = useCallback(async () => {
+    try {
+      const res = await fetch("/api/chats")
+      if (res.ok) {
+        const data = await res.json()
+        setThreads(data.threads || [])
+      }
+    } catch (error) {
+      console.error("Failed to fetch threads:", error)
+    } finally {
+      setIsLoadingThreads(false)
     }
   }, [])
 
@@ -430,6 +454,11 @@ function UnifiedDemoContent() {
     }
     fetchWorkspace()
   }, [])
+
+  // Fetch threads for sidebar on mount
+  useEffect(() => {
+    fetchThreads()
+  }, [fetchThreads])
 
   // Load chat from URL if chatId is present
   useEffect(() => {
@@ -818,6 +847,8 @@ function UnifiedDemoContent() {
             text: userMessage.text,
             createdAt: userMessage.createdAt,
           })
+          // Refresh sidebar after creating new thread
+          fetchThreads()
         }
       })
     } else {
@@ -950,6 +981,8 @@ function UnifiedDemoContent() {
             text: userMessage.text,
             createdAt: userMessage.createdAt,
           })
+          // Refresh sidebar after creating new thread
+          fetchThreads()
         }
       })
     } else {
@@ -1241,7 +1274,7 @@ function UnifiedDemoContent() {
   }
 
   // Reset chat state
-  const handleReset = () => {
+  const handleReset = useCallback(() => {
     // If we were viewing a specific chat, navigate back to clean URL
     if (urlChatId) {
       router.push("/demos/unified")
@@ -1262,10 +1295,31 @@ function UnifiedDemoContent() {
     pendingBranchContextRef.current = null
     chainQueueRef.current = Promise.resolve()
     toast.success("Chat cleared")
-  }
+  }, [urlChatId, router])
 
   const hasMessages = state.messages.length > 0
   const hasFinderResults = finderOptions.length > 0
+
+  // Format relative time for sidebar
+  const formatRelativeTime = (timestamp: number): string => {
+    const now = Date.now()
+    const diff = now - timestamp
+    const minutes = Math.floor(diff / 60000)
+    const hours = Math.floor(diff / 3600000)
+    const days = Math.floor(diff / 86400000)
+
+    if (minutes < 1) return "Just now"
+    if (minutes < 60) return `${minutes}m ago`
+    if (hours < 24) return `${hours}h ago`
+    if (days < 7) return `${days}d ago`
+    return new Date(timestamp).toLocaleDateString()
+  }
+
+  // Handle clicking a thread in sidebar
+  const handleSelectThread = (threadId: string) => {
+    if (threadId === storedThreadIdRef.current) return
+    router.push(`/demos/unified?chatId=${threadId}`)
+  }
 
   // ==========================================================================
   // RENDER
@@ -1273,166 +1327,211 @@ function UnifiedDemoContent() {
 
   return (
     <TooltipProvider delayDuration={300}>
-      <div className="flex flex-col h-full">
-        {/* Storage warning banner */}
-        <StorageWarningBanner className="m-2" />
-
-        {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-border">
-          <div className="flex items-center gap-2">
-            <Zap className="h-5 w-5 text-primary" />
-            <span className="font-medium">Unified Chat</span>
-            {state.lastResponseId && (
-              <span className="text-xs text-muted-foreground font-mono bg-muted px-2 py-0.5 rounded">
-                {state.lastResponseId.slice(0, 12)}...
-              </span>
-            )}
+      <div className="flex h-full">
+        {/* Left Sidebar */}
+        <div className="w-64 border-r border-border flex flex-col bg-muted/30">
+          <div className="p-3 border-b border-border">
+            <Button
+              onClick={handleReset}
+              className="w-full gap-2"
+              variant="outline"
+            >
+              <Plus className="h-4 w-4" />
+              New Chat
+            </Button>
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleReset}
-            disabled={!hasMessages && !inputValue && !hasFinderResults}
-            className="gap-1.5"
-          >
-            <RotateCcw className="h-4 w-4" />
-            New chat
-          </Button>
+          <ScrollArea className="flex-1">
+            <div className="p-2 space-y-1">
+              {isLoadingThreads ? (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                </div>
+              ) : threads.length === 0 ? (
+                <div className="text-center py-8 text-sm text-muted-foreground">
+                  No chats yet
+                </div>
+              ) : (
+                threads.map((thread) => {
+                  const isActive = thread.id === storedThreadIdRef.current || thread.id === urlChatId
+                  return (
+                    <button
+                      key={thread.id}
+                      onClick={() => handleSelectThread(thread.id)}
+                      className={`w-full text-left p-2.5 rounded-lg transition-colors hover:bg-accent/50 ${
+                        isActive ? "bg-accent" : ""
+                      }`}
+                    >
+                      <div className="flex items-start gap-2">
+                        <MessageSquare className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm font-medium truncate">
+                            {thread.title || "New Chat"}
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            {formatRelativeTime(thread.updatedAt)}
+                          </div>
+                        </div>
+                      </div>
+                    </button>
+                  )
+                })
+              )}
+            </div>
+          </ScrollArea>
         </div>
 
-        {/* Messages area */}
-        <div
-          ref={messagesContainerRef}
-          onScroll={handleScroll}
-          className="flex-1 overflow-y-auto"
-        >
-          {!hasMessages && !isLoading && !hasFinderResults && !finderPending ? (
-            // Empty state
-            <div className="flex flex-col items-center justify-center h-full text-center p-8">
-              <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mb-4">
-                <Zap className="h-8 w-8 text-primary" />
-              </div>
-              <h3 className="text-lg font-medium mb-2">Unified Chat</h3>
-              <p className="text-sm text-muted-foreground max-w-sm mb-4">
-                All features in one place. Chat, branch, run Codex tasks, or
-                find past conversations.
-              </p>
-              <div className="text-xs text-muted-foreground/70 max-w-sm p-3 bg-muted rounded-lg space-y-2">
-                <p>
-                  <strong>Features:</strong>
-                </p>
-                <p>
-                  <code className="bg-background px-1 rounded">@codex</code>{" "}
-                  &mdash; Generate code with task cards
-                </p>
-                <p>
-                  <code className="bg-background px-1 rounded">/find</code>{" "}
-                  &mdash; Search past conversations
-                </p>
-                <p>
-                  <span className="inline-flex items-center gap-1">
-                    <Sparkles className="h-3 w-3" /> Branch
-                  </span>{" "}
-                  &mdash; Click branch on any assistant message
-                </p>
-              </div>
+        {/* Main Chat Area */}
+        <div className="flex-1 flex flex-col">
+          {/* Storage warning banner */}
+          <StorageWarningBanner className="m-2" />
+
+          {/* Header */}
+          <div className="flex items-center justify-between p-4 border-b border-border">
+            <div className="flex items-center gap-2">
+              <Zap className="h-5 w-5 text-primary" />
+              <span className="font-medium">Unified Chat</span>
+              {state.lastResponseId && (
+                <span className="text-xs text-muted-foreground font-mono bg-muted px-2 py-0.5 rounded">
+                  {state.lastResponseId.slice(0, 12)}...
+                </span>
+              )}
             </div>
-          ) : (
-            // Messages list
-            <div className="p-4 space-y-4">
-              {messages.map((message) => {
-                // Render TaskCard for task messages
-                if (message.isTaskCard && message.taskId) {
-                  const task = tasks[message.taskId]
-                  if (!task) return null
+          </div>
+
+          {/* Messages area */}
+          <div
+            ref={messagesContainerRef}
+            onScroll={handleScroll}
+            className="flex-1 overflow-y-auto"
+          >
+            {!hasMessages && !isLoading && !hasFinderResults && !finderPending ? (
+              // Empty state
+              <div className="flex flex-col items-center justify-center h-full text-center p-8">
+                <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mb-4">
+                  <Zap className="h-8 w-8 text-primary" />
+                </div>
+                <h3 className="text-lg font-medium mb-2">Unified Chat</h3>
+                <p className="text-sm text-muted-foreground max-w-sm mb-4">
+                  All features in one place. Chat, branch, run Codex tasks, or
+                  find past conversations.
+                </p>
+                <div className="text-xs text-muted-foreground/70 max-w-sm p-3 bg-muted rounded-lg space-y-2">
+                  <p>
+                    <strong>Features:</strong>
+                  </p>
+                  <p>
+                    <code className="bg-background px-1 rounded">@codex</code>{" "}
+                    &mdash; Generate code with task cards
+                  </p>
+                  <p>
+                    <code className="bg-background px-1 rounded">/find</code>{" "}
+                    &mdash; Search past conversations
+                  </p>
+                  <p>
+                    <span className="inline-flex items-center gap-1">
+                      <Sparkles className="h-3 w-3" /> Branch
+                    </span>{" "}
+                    &mdash; Click branch on any assistant message
+                  </p>
+                </div>
+              </div>
+            ) : (
+              // Messages list
+              <div className="p-4 space-y-4">
+                {messages.map((message) => {
+                  // Render TaskCard for task messages
+                  if (message.isTaskCard && message.taskId) {
+                    const task = tasks[message.taskId]
+                    if (!task) return null
+                    return (
+                      <TaskCard
+                        key={`${message.localId}-${message.taskId}`}
+                        task={task}
+                        workspace={workspace || undefined}
+                        onApplyChanges={() => applyTaskChanges(task.id)}
+                        onCreatePR={() => createTaskPR(task.id)}
+                        onRefresh={async () => { await refreshTask(task.id) }}
+                      />
+                    )
+                  }
+
+                  // Render regular message bubble
                   return (
-                    <TaskCard
-                      key={`${message.localId}-${message.taskId}`}
-                      task={task}
-                      workspace={workspace || undefined}
-                      onApplyChanges={() => applyTaskChanges(task.id)}
-                      onCreatePR={() => createTaskPR(task.id)}
-                      onRefresh={async () => { await refreshTask(task.id) }}
+                    <ChatMessageBubble
+                      key={message.localId}
+                      message={message}
+                      onBranch={handleBranch}
+                      branches={branchesByParentLocalId[message.localId] || []}
+                      onOpenBranch={handleOpenBranch}
                     />
                   )
-                }
+                })}
 
-                // Render regular message bubble
-                return (
-                  <ChatMessageBubble
-                    key={message.localId}
-                    message={message}
-                    onBranch={handleBranch}
-                    branches={branchesByParentLocalId[message.localId] || []}
-                    onOpenBranch={handleOpenBranch}
-                  />
-                )
-              })}
-
-              {/* Finder pending state */}
-              {finderPending && (
-                <div className="flex items-start">
-                  <div className="bg-muted rounded-2xl rounded-bl-md px-4 py-3">
-                    <div className="flex items-center gap-2">
-                      <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                      <span className="text-sm text-muted-foreground">
-                        Searching...
-                      </span>
+                {/* Finder pending state */}
+                {finderPending && (
+                  <div className="flex items-start">
+                    <div className="bg-muted rounded-2xl rounded-bl-md px-4 py-3">
+                      <div className="flex items-center gap-2">
+                        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                        <span className="text-sm text-muted-foreground">
+                          Searching...
+                        </span>
+                      </div>
                     </div>
                   </div>
-                </div>
-              )}
+                )}
 
-              {/* Finder results */}
-              {!finderPending && hasFinderResults && (
-                <div className="flex items-start">
-                  <div className="max-w-[90%] space-y-3">
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground mb-2">
-                      <Search className="h-4 w-4" />
-                      <span>
-                        Found {finderOptions.length} matching{" "}
-                        {finderOptions.length === 1 ? "chat" : "chats"}
-                      </span>
+                {/* Finder results */}
+                {!finderPending && hasFinderResults && (
+                  <div className="flex items-start">
+                    <div className="max-w-[90%] space-y-3">
+                      <div className="flex items-center gap-2 text-sm text-muted-foreground mb-2">
+                        <Search className="h-4 w-4" />
+                        <span>
+                          Found {finderOptions.length} matching{" "}
+                          {finderOptions.length === 1 ? "chat" : "chats"}
+                        </span>
+                      </div>
+                      {finderOptions.map((option) => (
+                        <FinderOptionCard
+                          key={option.chatId}
+                          option={option}
+                          onClick={() => handleOpenFoundChat(option.chatId)}
+                          isOpening={openingChatId === option.chatId}
+                          disabled={openingChatId !== null}
+                        />
+                      ))}
                     </div>
-                    {finderOptions.map((option) => (
-                      <FinderOptionCard
-                        key={option.chatId}
-                        option={option}
-                        onClick={() => handleOpenFoundChat(option.chatId)}
-                        isOpening={openingChatId === option.chatId}
-                        disabled={openingChatId !== null}
-                      />
-                    ))}
                   </div>
-                </div>
-              )}
+                )}
 
-              {isLoading && <TypingIndicator />}
-              <div ref={messagesEndRef} />
-            </div>
-          )}
-        </div>
+                {isLoading && <TypingIndicator />}
+                <div ref={messagesEndRef} />
+              </div>
+            )}
+          </div>
 
-        {/* Composer */}
-        <div className="flex items-end gap-2 p-4 border-t border-border bg-card/50">
-          <Textarea
-            ref={textareaRef}
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Type a message, @codex to run a task, or /find to search..."
-            disabled={isLoading || isMerging}
-            rows={1}
-            className="min-h-[44px] max-h-[200px] resize-none bg-background"
-          />
-          <Button
-            onClick={handleSend}
-            disabled={isLoading || isMerging || !inputValue.trim()}
-            size="icon"
-            className="h-[44px] w-[44px] shrink-0"
-          >
-            <Send className="h-4 w-4" />
-          </Button>
+          {/* Composer */}
+          <div className="flex items-end gap-2 p-4 border-t border-border bg-card/50">
+            <Textarea
+              ref={textareaRef}
+              value={inputValue}
+              onChange={(e) => setInputValue(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Type a message, @codex to run a task, or /find to search..."
+              disabled={isLoading || isMerging}
+              rows={1}
+              className="min-h-[44px] max-h-[200px] resize-none bg-background"
+            />
+            <Button
+              onClick={handleSend}
+              disabled={isLoading || isMerging || !inputValue.trim()}
+              size="icon"
+              className="h-[44px] w-[44px] shrink-0"
+            >
+              <Send className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
 
         {/* Branch Overlay */}

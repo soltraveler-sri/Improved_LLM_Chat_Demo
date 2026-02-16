@@ -7,12 +7,12 @@ import {
   GitBranch,
   History,
   Terminal,
-  Zap,
   Sun,
   Moon,
   Database,
   HardDrive,
   AlertTriangle,
+  ChevronDown,
 } from "lucide-react"
 import { useTheme } from "next-themes"
 import { Button } from "@/components/ui/button"
@@ -22,9 +22,15 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
 
-const navItems = [
+const demoItems = [
   {
     href: "/demos/branches",
     label: "Branches",
@@ -39,11 +45,6 @@ const navItems = [
     href: "/demos/codex",
     label: "Codex",
     icon: Terminal,
-  },
-  {
-    href: "/demos/unified",
-    label: "Unified",
-    icon: Zap,
   },
 ]
 
@@ -179,6 +180,10 @@ export function Nav() {
   const pathname = usePathname()
   const { theme, setTheme } = useTheme()
 
+  // Check if current page is one of the individual demos
+  const isOnDemoPage = demoItems.some((item) => pathname === item.href)
+  const currentDemo = demoItems.find((item) => pathname === item.href)
+
   return (
     <nav className="flex items-center justify-between px-6 py-4 border-b border-border/50">
       <div className="flex items-center gap-1">
@@ -189,21 +194,44 @@ export function Nav() {
           LLM Chat Demos
         </Link>
         <div className="flex items-center gap-1">
-          {navItems.map((item) => {
-            const isActive = pathname === item.href
-            return (
-              <Link key={item.href} href={item.href}>
-                <Button
-                  variant={isActive ? "secondary" : "ghost"}
-                  size="sm"
-                  className={cn("gap-2", isActive && "bg-secondary")}
-                >
-                  <item.icon className="h-4 w-4" />
-                  {item.label}
-                </Button>
-              </Link>
-            )
-          })}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant={isOnDemoPage ? "secondary" : "ghost"}
+                size="sm"
+                className={cn("gap-2", isOnDemoPage && "bg-secondary")}
+              >
+                {currentDemo ? (
+                  <>
+                    <currentDemo.icon className="h-4 w-4" />
+                    {currentDemo.label}
+                  </>
+                ) : (
+                  "Demos"
+                )}
+                <ChevronDown className="h-3 w-3" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start">
+              {demoItems.map((item) => {
+                const isActive = pathname === item.href
+                return (
+                  <DropdownMenuItem key={item.href} asChild>
+                    <Link
+                      href={item.href}
+                      className={cn(
+                        "flex items-center gap-2 cursor-pointer",
+                        isActive && "bg-accent"
+                      )}
+                    >
+                      <item.icon className="h-4 w-4" />
+                      {item.label}
+                    </Link>
+                  </DropdownMenuItem>
+                )
+              })}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
       <div className="flex items-center gap-3">
