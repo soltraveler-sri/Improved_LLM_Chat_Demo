@@ -113,7 +113,7 @@ interface UnifiedMessage extends ChatMessage {
 }
 
 // =============================================================================
-// PERSISTENCE HELPERS (fire-and-forget, best-effort)
+// PERSISTENCE HELPERS (awaitable, errors surfaced)
 // =============================================================================
 
 async function createStoredThread(title?: string): Promise<string | null> {
@@ -123,34 +123,56 @@ async function createStoredThread(title?: string): Promise<string | null> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: title || "New Chat", category: "recent" }),
     })
-    if (!res.ok) return null
+    if (!res.ok) {
+      console.error("[Persist] createStoredThread failed:", res.status)
+      return null
+    }
     const data = await res.json()
     return data.thread?.id ?? null
-  } catch {
+  } catch (err) {
+    console.error("[Persist] createStoredThread error:", err)
     return null
   }
 }
 
-function persistMessage(
+async function persistMessage(
   threadId: string,
   message: { id: string; role: string; text: string; createdAt: number; responseId?: string }
-): void {
-  fetch(`/api/chats/${threadId}/messages`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(message),
-  }).catch(() => {})
+): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/chats/${threadId}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(message),
+    })
+    if (!res.ok) {
+      console.error("[Persist] persistMessage failed:", res.status, threadId)
+    }
+    return res.ok
+  } catch (err) {
+    console.error("[Persist] persistMessage error:", err)
+    return false
+  }
 }
 
-function updateStoredThread(
+async function updateStoredThread(
   threadId: string,
-  updates: { title?: string; lastResponseId?: string | null }
-): void {
-  fetch(`/api/chats/${threadId}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(updates),
-  }).catch(() => {})
+  updates: { title?: string; summary?: string; lastResponseId?: string | null }
+): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/chats/${threadId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updates),
+    })
+    if (!res.ok) {
+      console.error("[Persist] updateStoredThread failed:", res.status, threadId)
+    }
+    return res.ok
+  } catch (err) {
+    console.error("[Persist] updateStoredThread error:", err)
+    return false
+  }
 }
 
 // =============================================================================
@@ -268,9 +290,11 @@ function UnifiedDemoContent() {
       if (res.ok) {
         const data = await res.json()
         setThreads(data.threads || [])
+      } else {
+        console.error("[fetchThreads] API returned:", res.status)
       }
     } catch (error) {
-      console.error("Failed to fetch threads:", error)
+      console.error("[fetchThreads] Failed:", error)
     } finally {
       setIsLoadingThreads(false)
     }
@@ -836,21 +860,23 @@ function UnifiedDemoContent() {
     }))
     setIsLoading(true)
 
-    // Persist user message — await thread creation so messages are never lost
+    // Persist user message — await thread creation AND message before proceeding
     if (!storedThreadIdRef.current) {
       const id = await createStoredThread(`@codex: ${prompt.slice(0, 30)}...`)
       if (id) {
         storedThreadIdRef.current = id
-        persistMessage(id, {
+        await persistMessage(id, {
           id: userMessage.localId,
           role: userMessage.role,
           text: userMessage.text,
           createdAt: userMessage.createdAt,
         })
         fetchThreads()
+      } else {
+        toast.error("Failed to save chat — storage may be unavailable")
       }
     } else {
-      persistMessage(storedThreadIdRef.current, {
+      await persistMessage(storedThreadIdRef.current, {
         id: userMessage.localId,
         role: userMessage.role,
         text: userMessage.text,
@@ -968,22 +994,24 @@ function UnifiedDemoContent() {
     }))
     setIsLoading(true)
 
-    // Persistence — await thread creation so messages are never lost
+    // Persistence — await thread creation AND user message before proceeding
     if (!storedThreadIdRef.current) {
       const threadTitle = userText.length > 50 ? userText.slice(0, 50) + "..." : userText
       const id = await createStoredThread(threadTitle)
       if (id) {
         storedThreadIdRef.current = id
-        persistMessage(id, {
+        await persistMessage(id, {
           id: userMessage.localId,
           role: userMessage.role,
           text: userMessage.text,
           createdAt: userMessage.createdAt,
         })
         fetchThreads()
+      } else {
+        toast.error("Failed to save chat — storage may be unavailable")
       }
     } else {
-      persistMessage(storedThreadIdRef.current, {
+      await persistMessage(storedThreadIdRef.current, {
         id: userMessage.localId,
         role: userMessage.role,
         text: userMessage.text,
@@ -1027,18 +1055,24 @@ function UnifiedDemoContent() {
           lastResponseId: responseData.id,
         }))
 
-        // Persist assistant message
-        if (storedThreadIdRef.current) {
-          persistMessage(storedThreadIdRef.current, {
+        // Persist assistant message and update thread — await both
+        const threadId = storedThreadIdRef.current
+        if (threadId) {
+          await persistMessage(threadId, {
             id: assistantMessage.localId,
             role: assistantMessage.role,
             text: assistantMessage.text,
             createdAt: assistantMessage.createdAt,
             responseId: assistantMessage.responseId,
           })
-          updateStoredThread(storedThreadIdRef.current, {
+          // Build a summary from the first exchange for /find searchability
+          const summaryText = `${userText}\n${responseData.output_text}`.slice(0, 200)
+          await updateStoredThread(threadId, {
             lastResponseId: responseData.id,
+            summary: summaryText,
           })
+          // Refresh sidebar so the thread shows updated title/time
+          fetchThreads()
         }
       })
     } catch (error) {
@@ -1128,7 +1162,7 @@ function UnifiedDemoContent() {
 
         // Persist context message
         if (storedThreadIdRef.current) {
-          persistMessage(storedThreadIdRef.current, {
+          await persistMessage(storedThreadIdRef.current, {
             id: contextMessage.localId,
             role: contextMessage.role,
             text: contextMessage.text,
@@ -1271,7 +1305,14 @@ function UnifiedDemoContent() {
   }
 
   // Reset chat state
-  const handleReset = useCallback(() => {
+  const handleReset = useCallback(async () => {
+    // Flush any pending persistence before switching
+    const prevThreadId = storedThreadIdRef.current
+    if (prevThreadId) {
+      // Give pending fire-and-forget fetches a moment to land
+      await new Promise((r) => setTimeout(r, 100))
+    }
+
     // If we were viewing a specific chat, navigate back to clean URL
     if (urlChatId) {
       router.push("/demos/unified")
@@ -1292,8 +1333,8 @@ function UnifiedDemoContent() {
     pendingBranchContextRef.current = null
     chainQueueRef.current = Promise.resolve()
 
-    // Refresh sidebar so past chats remain visible
-    fetchThreads()
+    // Refresh sidebar so past chats remain visible — await it
+    await fetchThreads()
   }, [urlChatId, router, fetchThreads])
 
   const hasMessages = state.messages.length > 0
