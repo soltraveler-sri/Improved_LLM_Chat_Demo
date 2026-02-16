@@ -836,21 +836,19 @@ function UnifiedDemoContent() {
     }))
     setIsLoading(true)
 
-    // Persist user message
+    // Persist user message — await thread creation so messages are never lost
     if (!storedThreadIdRef.current) {
-      createStoredThread(`@codex: ${prompt.slice(0, 30)}...`).then((id) => {
-        if (id) {
-          storedThreadIdRef.current = id
-          persistMessage(id, {
-            id: userMessage.localId,
-            role: userMessage.role,
-            text: userMessage.text,
-            createdAt: userMessage.createdAt,
-          })
-          // Refresh sidebar after creating new thread
-          fetchThreads()
-        }
-      })
+      const id = await createStoredThread(`@codex: ${prompt.slice(0, 30)}...`)
+      if (id) {
+        storedThreadIdRef.current = id
+        persistMessage(id, {
+          id: userMessage.localId,
+          role: userMessage.role,
+          text: userMessage.text,
+          createdAt: userMessage.createdAt,
+        })
+        fetchThreads()
+      }
     } else {
       persistMessage(storedThreadIdRef.current, {
         id: userMessage.localId,
@@ -970,21 +968,20 @@ function UnifiedDemoContent() {
     }))
     setIsLoading(true)
 
-    // Persistence
+    // Persistence — await thread creation so messages are never lost
     if (!storedThreadIdRef.current) {
-      createStoredThread().then((id) => {
-        if (id) {
-          storedThreadIdRef.current = id
-          persistMessage(id, {
-            id: userMessage.localId,
-            role: userMessage.role,
-            text: userMessage.text,
-            createdAt: userMessage.createdAt,
-          })
-          // Refresh sidebar after creating new thread
-          fetchThreads()
-        }
-      })
+      const threadTitle = userText.length > 50 ? userText.slice(0, 50) + "..." : userText
+      const id = await createStoredThread(threadTitle)
+      if (id) {
+        storedThreadIdRef.current = id
+        persistMessage(id, {
+          id: userMessage.localId,
+          role: userMessage.role,
+          text: userMessage.text,
+          createdAt: userMessage.createdAt,
+        })
+        fetchThreads()
+      }
     } else {
       persistMessage(storedThreadIdRef.current, {
         id: userMessage.localId,
@@ -1294,8 +1291,10 @@ function UnifiedDemoContent() {
     lastResponseIdRef.current = null
     pendingBranchContextRef.current = null
     chainQueueRef.current = Promise.resolve()
-    toast.success("Chat cleared")
-  }, [urlChatId, router])
+
+    // Refresh sidebar so past chats remain visible
+    fetchThreads()
+  }, [urlChatId, router, fetchThreads])
 
   const hasMessages = state.messages.length > 0
   const hasFinderResults = finderOptions.length > 0
