@@ -541,11 +541,6 @@ export default function BranchesDemo() {
           <div className="flex items-center gap-2">
             <MessageSquare className="h-5 w-5 text-muted-foreground" />
             <span className="font-medium">Chat</span>
-            {state.lastResponseId && (
-              <span className="text-xs text-muted-foreground font-mono bg-muted px-2 py-0.5 rounded">
-                {state.lastResponseId.slice(0, 12)}...
-              </span>
-            )}
           </div>
           <Button
             variant="ghost"

@@ -479,11 +479,6 @@ export default function CodexDemoPage() {
             <div className="flex items-center gap-2">
               <Terminal className="h-5 w-5 text-primary" />
               <span className="font-medium">Codex Demo</span>
-              {lastResponseId && (
-                <span className="text-xs text-muted-foreground font-mono bg-muted px-2 py-0.5 rounded">
-                  {lastResponseId.slice(0, 12)}...
-                </span>
-              )}
             </div>
             <div className="flex items-center gap-2">
               <Button

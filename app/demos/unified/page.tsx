@@ -1430,11 +1430,6 @@ function UnifiedDemoContent() {
             <div className="flex items-center gap-2">
               <Zap className="h-5 w-5 text-primary" />
               <span className="font-medium">Unified Chat</span>
-              {state.lastResponseId && (
-                <span className="text-xs text-muted-foreground font-mono bg-muted px-2 py-0.5 rounded">
-                  {state.lastResponseId.slice(0, 12)}...
-                </span>
-              )}
             </div>
           </div>
 
