@@ -67,11 +67,6 @@ const MIN_CONFIDENCE_THRESHOLD = 0.6
 // Lexical scoring for candidate generation
 // ---------------------------------------------------------------------------
 
-interface ScoredCandidate {
-  chat: StoredChatThreadMeta
-  score: number
-}
-
 function tokenize(text: string): string[] {
   return text
     .toLowerCase()
@@ -80,10 +75,18 @@ function tokenize(text: string): string[] {
     .filter((token) => token.length > 1)
 }
 
+interface ScoredCandidateWithSnippet {
+  chat: StoredChatThreadMeta
+  score: number
+  /** Recent message snippet for rerank context */
+  messageSnippet?: string
+}
+
 function computeLexicalScore(
   query: string,
   chat: StoredChatThreadMeta,
-  now: number
+  now: number,
+  messageText?: string
 ): number {
   const queryTokens = new Set(tokenize(query))
   if (queryTokens.size === 0) return 0
@@ -105,8 +108,17 @@ function computeLexicalScore(
     if (queryTokens.has(token)) summaryMatches++
   }
 
-  // Title matches weighted 3x, summary matches weighted 1x
-  const matchScore = titleMatches * 3 + summaryMatches
+  // Also score against message transcript if available
+  let messageMatches = 0
+  if (messageText) {
+    const messageTokens = tokenize(messageText)
+    for (const token of messageTokens) {
+      if (queryTokens.has(token)) messageMatches++
+    }
+  }
+
+  // Title matches weighted 3x, summary 1x, message content 0.5x
+  const matchScore = titleMatches * 3 + summaryMatches + messageMatches * 0.5
 
   // Recency bias: chats updated in last 7 days get a slight boost
   const ageMs = now - chat.updatedAt
@@ -116,23 +128,25 @@ function computeLexicalScore(
   return matchScore + recencyBoost
 }
 
-function selectTopCandidates(
+function selectTopCandidatesWithSnippets(
   chats: StoredChatThreadMeta[],
   query: string,
-  maxCandidates: number
-): StoredChatThreadMeta[] {
+  maxCandidates: number,
+  messageTexts: Map<string, string>
+): ScoredCandidateWithSnippet[] {
   const now = Date.now()
 
-  const scored: ScoredCandidate[] = chats.map((chat) => ({
+  const scored: ScoredCandidateWithSnippet[] = chats.map((chat) => ({
     chat,
-    score: computeLexicalScore(query, chat, now),
+    score: computeLexicalScore(query, chat, now, messageTexts.get(chat.id)),
+    messageSnippet: messageTexts.get(chat.id),
   }))
 
   // Sort by score descending
   scored.sort((a, b) => b.score - a.score)
 
   // Take top maxCandidates
-  return scored.slice(0, maxCandidates).map((s) => s.chat)
+  return scored.slice(0, maxCandidates)
 }
 
 // ---------------------------------------------------------------------------
@@ -141,17 +155,20 @@ function selectTopCandidates(
 
 function buildRerankPrompt(
   query: string,
-  candidates: StoredChatThreadMeta[],
+  candidates: ScoredCandidateWithSnippet[],
   topK: number
 ): string {
   const candidateList = candidates
     .map((c, i) => {
-      const summary = c.summary || "(no summary available)"
-      const date = new Date(c.updatedAt).toISOString().split("T")[0]
-      return `${i + 1}. [ID: ${c.id}]
-   Title: ${c.title}
+      const summary = c.chat.summary || "(no summary available)"
+      const date = new Date(c.chat.updatedAt).toISOString().split("T")[0]
+      const snippetSection = c.messageSnippet
+        ? `\n   Recent messages: ${c.messageSnippet}`
+        : ""
+      return `${i + 1}. [ID: ${c.chat.id}]
+   Title: ${c.chat.title}
    Summary: ${summary}
-   Last updated: ${date}`
+   Last updated: ${date}${snippetSection}`
     })
     .join("\n\n")
 
@@ -230,7 +247,7 @@ export async function POST(request: NextRequest) {
 
     const topK = envTopK ? parseInt(envTopK, 10) : DEFAULT_TOPK
 
-    // Step A: Load all chats and generate candidates locally
+    // Step A: Load all chats, fetch message snippets, and generate candidates
     const store = getChatStore()
     const allChats = await store.listThreads(demoUid)
 
@@ -239,19 +256,41 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(response)
     }
 
-    const candidates = selectTopCandidates(allChats, query, maxCandidates)
+    // Load message text snippets for transcript-aware search
+    // Fetch full threads to extract recent message text for scoring and rerank
+    const messageTexts = new Map<string, string>()
+    await Promise.all(
+      allChats.map(async (chat) => {
+        try {
+          const thread = await store.getThread(demoUid, chat.id)
+          if (thread && thread.messages.length > 0) {
+            // Build a compact snippet from the last ~10 messages (max 500 chars)
+            const recentMessages = thread.messages.slice(-10)
+            const snippet = recentMessages
+              .map((m) => `${m.role}: ${m.text}`)
+              .join(" | ")
+              .slice(0, 500)
+            messageTexts.set(chat.id, snippet)
+          }
+        } catch {
+          // Skip if thread load fails
+        }
+      })
+    )
 
-    if (candidates.length === 0) {
+    const scoredCandidates = selectTopCandidatesWithSnippets(allChats, query, maxCandidates, messageTexts)
+
+    if (scoredCandidates.length === 0) {
       const response: FindResponse = { query, options: [] }
       return NextResponse.json(response)
     }
 
     // Step B: LLM rerank using centralized client
     // Uses "finder" kind: gpt-5-mini with reasoning: low (NOT "none"!)
-    const prompt = buildRerankPrompt(query, candidates, topK)
+    const prompt = buildRerankPrompt(query, scoredCandidates, topK)
     const config = getConfigInfo("finder")
 
-    console.log(`[POST /api/chats/find] Reranking ${candidates.length} candidates with model ${config.model}`)
+    console.log(`[POST /api/chats/find] Reranking ${scoredCandidates.length} candidates with model ${config.model}`)
 
     const { parsed } = await createParsedResponse({
       kind: "finder",
@@ -271,8 +310,8 @@ export async function POST(request: NextRequest) {
     // Step C: Build response with joined metadata
     // Create a lookup map for candidates
     const candidateMap = new Map<string, StoredChatThreadMeta>()
-    for (const c of candidates) {
-      candidateMap.set(c.id, c)
+    for (const c of scoredCandidates) {
+      candidateMap.set(c.chat.id, c.chat)
     }
 
     const options: FindOption[] = []

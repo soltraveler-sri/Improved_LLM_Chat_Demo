@@ -137,7 +137,16 @@ async function createStoredThread(title?: string): Promise<string | null> {
 
 async function persistMessage(
   threadId: string,
-  message: { id: string; role: string; text: string; createdAt: number; responseId?: string }
+  message: {
+    id: string
+    role: string
+    text: string
+    createdAt: number
+    responseId?: string
+    taskId?: string
+    isTaskCard?: boolean
+    contextMeta?: { branchId: string; branchTitle: string; mergeType: "summary" | "full" }
+  }
 ): Promise<boolean> {
   try {
     const res = await fetch(`/api/chats/${threadId}/messages`, {
@@ -240,13 +249,6 @@ function UnifiedDemoContent() {
   const [workspace, setWorkspace] = useState<WorkspaceSnapshot | null>(null)
   const ingestedTaskIdsRef = useRef<Set<string>>(new Set())
   const isIngestingRef = useRef(false)
-  // Store pending branch context to prepend to next user message (avoids slow LLM call)
-  const pendingBranchContextRef = useRef<{
-    contextInput: string
-    branchId: string
-    branchTitle: string
-    mergeType: "summary" | "full"
-  } | null>(null)
 
   // ==========================================================================
   // FIND STATE
@@ -500,14 +502,33 @@ function UnifiedDemoContent() {
         const thread = data.thread as StoredChatThread
 
         if (thread) {
-          // Convert stored messages to ChatMessage format
+          // Convert stored messages to ChatMessage format, preserving task/context metadata
           const loadedMessages: UnifiedMessage[] = thread.messages.map((m) => ({
             localId: m.id,
             role: m.role as "user" | "assistant" | "context",
             text: m.text,
             createdAt: m.createdAt,
             responseId: m.responseId,
+            ...(m.taskId ? { taskId: m.taskId } : {}),
+            ...(m.isTaskCard ? { isTaskCard: m.isTaskCard } : {}),
+            ...(m.contextMeta ? { contextMeta: m.contextMeta } : {}),
           }))
+
+          // Restore task objects for any task card messages
+          const taskCardMessages = loadedMessages.filter((m) => m.isTaskCard && m.taskId)
+          for (const msg of taskCardMessages) {
+            if (msg.taskId && !msg.taskId.startsWith("placeholder_")) {
+              try {
+                const taskRes = await fetch(`/api/codex/tasks/${msg.taskId}`)
+                if (taskRes.ok) {
+                  const taskData = await taskRes.json()
+                  setTasks((prev) => ({ ...prev, [msg.taskId!]: taskData.task }))
+                }
+              } catch {
+                // Task may no longer exist; the UI will handle missing tasks gracefully
+              }
+            }
+          }
 
           setState({
             messages: loadedMessages,
@@ -541,35 +562,22 @@ function UnifiedDemoContent() {
 
       return enqueueChain(async () => {
         try {
-          const currentResponseId = lastResponseIdRef.current
-
-          const res = await fetch("/api/respond", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              input: contextInput,
-              previous_response_id: currentResponseId,
-              mode: "deep",
-            }),
+          const responseData = await respondWithRetry({
+            input: contextInput,
+            mode: "deep",
+            source: "ingestion",
           })
 
-          const data = await res.json()
-
-          if (!res.ok) {
-            console.error("Failed to ingest task context:", data.error)
-            return
-          }
-
           // Update both ref (immediately) and state
-          lastResponseIdRef.current = data.id
+          lastResponseIdRef.current = responseData.id
           setState((prev) => ({
             ...prev,
-            lastResponseId: data.id,
+            lastResponseId: responseData.id,
           }))
 
           if (storedThreadIdRef.current) {
-            updateStoredThread(storedThreadIdRef.current, {
-              lastResponseId: data.id,
+            await updateStoredThread(storedThreadIdRef.current, {
+              lastResponseId: responseData.id,
             })
           }
 
@@ -583,7 +591,7 @@ function UnifiedDemoContent() {
         }
       })
     },
-    [enqueueChain]
+    [enqueueChain, respondWithRetry]
   )
 
   // Watch for completed tasks and ingest them
@@ -643,13 +651,13 @@ function UnifiedDemoContent() {
   }
 
   /**
-   * Perform branch merge - NO LLM call, just formats context for next message
-   * The context will be prepended to the user's next message automatically
+   * Perform branch merge - ingest context into the chain immediately
+   * This ensures merged context survives reload/reopen (consistent with Codex ingestion model)
    */
   const performMerge = async (
     branch: BranchThread,
     mergeMode: "summary" | "full"
-  ): Promise<{ contextText: string; contextInput: string } | null> => {
+  ): Promise<{ contextText: string; newResponseId: string } | null> => {
     try {
       let contextInput: string
       let displayText: string
@@ -691,17 +699,33 @@ function UnifiedDemoContent() {
         displayText = `Full transcript from "${branch.title}"`
       }
 
-      // Store context for next message instead of calling LLM now
-      pendingBranchContextRef.current = {
-        contextInput,
-        branchId: branch.id,
-        branchTitle: branch.title,
-        mergeType: mergeMode,
+      // Ingest context into chain immediately (like standalone branches)
+      // This ensures merged context survives reload/reopen
+      const responseData = await enqueueChain(async () => {
+        return respondWithRetry({
+          input: contextInput,
+          mode: "deep",
+          source: "ingestion",
+        })
+      })
+
+      // Update chain state
+      lastResponseIdRef.current = responseData.id
+      setState((prev) => ({
+        ...prev,
+        lastResponseId: responseData.id,
+      }))
+
+      // Persist chain head
+      if (storedThreadIdRef.current) {
+        await updateStoredThread(storedThreadIdRef.current, {
+          lastResponseId: responseData.id,
+        })
       }
 
       return {
         contextText: displayText,
-        contextInput,
+        newResponseId: responseData.id,
       }
     } catch (error) {
       console.error("Merge error:", error)
@@ -865,6 +889,8 @@ function UnifiedDemoContent() {
       const id = await createStoredThread(`@codex: ${prompt.slice(0, 30)}...`)
       if (id) {
         storedThreadIdRef.current = id
+        // Push thread into URL so reload preserves the active chat
+        router.replace(`/demos/unified?chatId=${id}`, { scroll: false })
         await persistMessage(id, {
           id: userMessage.localId,
           role: userMessage.role,
@@ -933,6 +959,18 @@ function UnifiedDemoContent() {
         }),
       }))
 
+      // Persist the task card message so it survives reopen
+      if (storedThreadIdRef.current) {
+        await persistMessage(storedThreadIdRef.current, {
+          id: taskMessage.localId,
+          role: taskMessage.role,
+          text: taskMessage.text,
+          createdAt: taskMessage.createdAt,
+          taskId: task.id,
+          isTaskCard: true,
+        })
+      }
+
       // Track which task to use for ingestion (either the returned task or the refreshed one)
       let taskForIngestion: CodexTask = task
 
@@ -944,23 +982,23 @@ function UnifiedDemoContent() {
         }
       }
 
-      // Re-enable input immediately so user doesn't see "..." after task completes
-      setIsLoading(false)
-
-      // Start ingestion in background (serialized via chain queue)
+      // Await ingestion before re-enabling input to ensure chain state is persisted
+      // This prevents reload/navigation from losing Codex context
       if (
         taskForIngestion.contextSummary &&
         !ingestedTaskIdsRef.current.has(taskForIngestion.id)
       ) {
         ingestedTaskIdsRef.current.add(taskForIngestion.id)
-        ingestTaskContext(taskForIngestion)
+        await ingestTaskContext(taskForIngestion)
 
         if (process.env.NODE_ENV === "development") {
           console.log(
-            `[Unified:handleCodexCommand] Task "${taskForIngestion.id.slice(0, 8)}..." context ingestion started (background)`
+            `[Unified:handleCodexCommand] Task "${taskForIngestion.id.slice(0, 8)}..." context ingestion completed`
           )
         }
       }
+
+      setIsLoading(false)
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : "Something went wrong"
@@ -971,15 +1009,7 @@ function UnifiedDemoContent() {
 
   // Handle regular chat message
   const handleRegularChat = async (userText: string) => {
-    // Check for pending branch context to prepend
-    const pendingContext = pendingBranchContextRef.current
-    let actualInput = userText
-    if (pendingContext) {
-      // Prepend the context to the user's message for the LLM
-      actualInput = `${pendingContext.contextInput}\n\n---\n\nUser message: ${userText}`
-      // Clear the pending context
-      pendingBranchContextRef.current = null
-    }
+    const actualInput = userText
 
     const userMessage: UnifiedMessage = {
       localId: generateId(),
@@ -1000,6 +1030,8 @@ function UnifiedDemoContent() {
       const id = await createStoredThread(threadTitle)
       if (id) {
         storedThreadIdRef.current = id
+        // Push thread into URL so reload preserves the active chat
+        router.replace(`/demos/unified?chatId=${id}`, { scroll: false })
         await persistMessage(id, {
           id: userMessage.localId,
           role: userMessage.role,
@@ -1021,24 +1053,12 @@ function UnifiedDemoContent() {
 
     try {
       await enqueueChain(async () => {
-        // Send with prepended context if any
-        const res = await fetch("/api/respond", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            input: actualInput,
-            previous_response_id: lastResponseIdRef.current,
-            mode: "deep",
-          }),
+        // Send with retry logic for chain recovery
+        const responseData = await respondWithRetry({
+          input: actualInput,
+          mode: "deep",
+          source: "user",
         })
-
-        const data = await res.json()
-
-        if (!res.ok) {
-          throw new Error(data.error || "Failed to get response")
-        }
-
-        const responseData = data as RespondResponse
 
         const assistantMessage: UnifiedMessage = {
           localId: generateId(),
@@ -1065,8 +1085,14 @@ function UnifiedDemoContent() {
             createdAt: assistantMessage.createdAt,
             responseId: assistantMessage.responseId,
           })
-          // Build a summary from the first exchange for /find searchability
-          const summaryText = `${userText}\n${responseData.output_text}`.slice(0, 200)
+          // Build a rolling summary from recent exchanges for /find searchability
+          // Include both first and latest exchanges so search can find later-message facts
+          const allMsgs = [...state.messages, userMessage, assistantMessage]
+          const firstExchange = allMsgs.slice(0, 2).map((m) => m.text).join(" | ")
+          const lastExchange = `${userText} | ${responseData.output_text}`
+          const summaryText = allMsgs.length <= 2
+            ? lastExchange.slice(0, 300)
+            : `${firstExchange.slice(0, 150)} ... ${lastExchange.slice(0, 150)}`
           await updateStoredThread(threadId, {
             lastResponseId: responseData.id,
             summary: summaryText,
@@ -1160,13 +1186,14 @@ function UnifiedDemoContent() {
           messages: [...prev.messages, contextMessage],
         }))
 
-        // Persist context message
+        // Persist context message with metadata
         if (storedThreadIdRef.current) {
           await persistMessage(storedThreadIdRef.current, {
             id: contextMessage.localId,
             role: contextMessage.role,
             text: contextMessage.text,
             createdAt: contextMessage.createdAt,
+            contextMeta: contextMessage.contextMeta,
           })
         }
 
@@ -1192,9 +1219,9 @@ function UnifiedDemoContent() {
         })
 
         toast.success(
-          "Branch context added",
+          "Branch context merged",
           {
-            description: `Context from "${branch.title}" will be included in your next message.`,
+            description: `Context from "${branch.title}" has been ingested into the chat chain.`,
           }
         )
       }
@@ -1330,7 +1357,6 @@ function UnifiedDemoContent() {
     storedThreadIdRef.current = null
     ingestedTaskIdsRef.current.clear()
     lastResponseIdRef.current = null
-    pendingBranchContextRef.current = null
     chainQueueRef.current = Promise.resolve()
 
     // Refresh sidebar so past chats remain visible — await it

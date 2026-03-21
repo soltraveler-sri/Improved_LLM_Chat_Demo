@@ -125,6 +125,7 @@ interface FinderViewProps {
 
 export function FinderView({
   currentChatId,
+  onOpenChat,
 }: FinderViewProps) {
   // Composer state - what user is currently typing
   const [inputValue, setInputValue] = useState("")
@@ -191,33 +192,19 @@ export function FinderView({
   // ---------------------------------------------------------------------------
   const handleOpenChat = useCallback(async (chatId: string) => {
     setOpeningChatId(chatId)
-    setIsLoadingPreview(true)
 
     try {
-      // Fetch the chat data
-      const res = await fetch(`/api/chats/${chatId}`)
-      if (!res.ok) {
-        throw new Error("Failed to load chat")
-      }
-
-      const data = await res.json()
-      const thread = data.thread as StoredChatThread
-
-      // Show the preview
-      setPreviewChatId(chatId)
-      setPreviewChatData(thread)
-
-      // Clear search results (but keep submittedQuery for reference)
+      // Use parent navigation for true URL-based resume (not local preview)
+      onOpenChat(chatId, false)
       setFinderOptions([])
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : "Failed to load chat"
       toast.error(errorMessage)
     } finally {
-      setIsLoadingPreview(false)
       setOpeningChatId(null)
     }
-  }, [])
+  }, [onOpenChat])
 
   // ---------------------------------------------------------------------------
   // Handle going back from preview to search

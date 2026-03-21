@@ -31,6 +31,16 @@ export interface StoredChatMessage {
   createdAt: number
   /** OpenAI response ID (for assistant messages) */
   responseId?: string
+  /** Task ID if this is a task card message */
+  taskId?: string
+  /** Whether this is a task card (renders TaskCard instead of bubble) */
+  isTaskCard?: boolean
+  /** Context metadata for branch merge context messages */
+  contextMeta?: {
+    branchId: string
+    branchTitle: string
+    mergeType: "summary" | "full"
+  }
 }
 
 /**
