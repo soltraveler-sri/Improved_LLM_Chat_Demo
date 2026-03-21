@@ -56,6 +56,9 @@ export async function POST(
       text: body.text,
       createdAt: body.createdAt || Date.now(),
       responseId: body.responseId,
+      ...(body.taskId ? { taskId: body.taskId } : {}),
+      ...(body.isTaskCard ? { isTaskCard: body.isTaskCard } : {}),
+      ...(body.contextMeta ? { contextMeta: body.contextMeta } : {}),
     }
 
     await store.appendMessage(demoUid, id, message)

@@ -166,23 +166,19 @@ export default function BranchesDemo() {
     setIsLoading(true)
     shouldAutoScroll.current = true
 
-    // --- PERSISTENCE (fire-and-forget, best-effort) ---
-    // Create stored thread on first message if not exists
+    // --- PERSISTENCE (await thread creation to prevent race) ---
     if (!storedThreadIdRef.current) {
-      createStoredThread().then((id) => {
-        if (id) {
-          storedThreadIdRef.current = id
-          // Persist the user message after thread is created
-          persistMessage(id, {
-            id: userMessage.localId,
-            role: userMessage.role,
-            text: userMessage.text,
-            createdAt: userMessage.createdAt,
-          })
-        }
-      })
+      const id = await createStoredThread()
+      if (id) {
+        storedThreadIdRef.current = id
+        persistMessage(id, {
+          id: userMessage.localId,
+          role: userMessage.role,
+          text: userMessage.text,
+          createdAt: userMessage.createdAt,
+        })
+      }
     } else {
-      // Thread already exists, just persist the user message
       persistMessage(storedThreadIdRef.current, {
         id: userMessage.localId,
         role: userMessage.role,
