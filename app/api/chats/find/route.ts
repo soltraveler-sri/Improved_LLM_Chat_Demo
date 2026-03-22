@@ -3,6 +3,7 @@ import { z } from "zod"
 import { getChatStore } from "@/lib/store"
 import type { StoredChatThreadMeta } from "@/lib/store"
 import { createParsedResponse, formatOpenAIError, getConfigInfo } from "@/lib/openai"
+import { logAuditServer } from "@/lib/telemetry"
 
 // ---------------------------------------------------------------------------
 // POST /api/chats/find
@@ -280,6 +281,21 @@ export async function POST(request: NextRequest) {
 
     const scoredCandidates = selectTopCandidatesWithSnippets(allChats, query, maxCandidates, messageTexts)
 
+    logAuditServer("5.4", "find_candidate_generation", {
+      query,
+      totalChats: allChats.length,
+      chatsWithSnippets: messageTexts.size,
+      chatsWithoutSnippets: allChats.length - messageTexts.size,
+      topCandidateCount: scoredCandidates.length,
+      topCandidateScores: scoredCandidates.slice(0, 5).map((c) => ({
+        id: c.chat.id.slice(0, 8),
+        title: c.chat.title,
+        score: c.score,
+        hasSnippet: !!c.messageSnippet,
+        snippetLen: c.messageSnippet?.length || 0,
+      })),
+    })
+
     if (scoredCandidates.length === 0) {
       const response: FindResponse = { query, options: [] }
       return NextResponse.json(response)
@@ -344,6 +360,18 @@ export async function POST(request: NextRequest) {
     const filteredOptions = options.filter(
       (opt) => opt.confidence >= MIN_CONFIDENCE_THRESHOLD
     )
+
+    logAuditServer("5.4", "find_rerank_results", {
+      query,
+      rawResultCount: parsed.results.length,
+      filteredResultCount: filteredOptions.length,
+      results: filteredOptions.map((o) => ({
+        chatId: o.chatId.slice(0, 8),
+        title: o.title,
+        confidence: o.confidence,
+        why: o.why,
+      })),
+    })
 
     const response: FindResponse = { query, options: filteredOptions }
     return NextResponse.json(response)

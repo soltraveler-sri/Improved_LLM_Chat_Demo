@@ -13,6 +13,7 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
+import { logAuditClient } from "@/lib/telemetry"
 import { FinderOptionCard, type FinderOption } from "./finder-option-card"
 import type { StoredChatThread } from "@/lib/store/types"
 import { CATEGORY_LABELS, type StoredChatCategory } from "@/lib/store/types"
@@ -194,6 +195,11 @@ export function FinderView({
     setOpeningChatId(chatId)
 
     try {
+      logAuditClient("5.3", "finder_open_via_parent_navigation", {
+        chatId,
+        method: "onOpenChat",
+        isLocalPreview: false,
+      })
       // Use parent navigation for true URL-based resume (not local preview)
       onOpenChat(chatId, false)
       setFinderOptions([])
