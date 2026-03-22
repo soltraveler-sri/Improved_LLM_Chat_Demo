@@ -113,133 +113,160 @@ class MemoryCodexStore {
 /**
  * Redis-backed store
  * Works with both Vercel KV and Upstash Redis env var patterns
+ * Errors propagate so ResilientCodexStore can detect and fall back.
  */
 class RedisCodexStore {
   async getTask(demoUid: string, taskId: string): Promise<CodexTask | null> {
     logOp("Redis", "getTask", demoUid, `taskId=${taskId.slice(0, 8)}`)
     const redis = getRedisClient()
     if (!redis) return null
-    
-    try {
-      return await redis.get<CodexTask>(taskKey(demoUid, taskId))
-    } catch (error) {
-      console.error("[RedisCodexStore] getTask error:", error)
-      return null
-    }
+    return await redis.get<CodexTask>(taskKey(demoUid, taskId))
   }
 
   async saveTask(demoUid: string, task: CodexTask): Promise<void> {
     logOp("Redis", "saveTask", demoUid, `taskId=${task.id.slice(0, 8)}`)
     const redis = getRedisClient()
     if (!redis) return
-    
-    try {
-      // Set task with TTL
-      await redis.set(taskKey(demoUid, task.id), task, { ex: KV_TTL_SECONDS })
-      // Add to task list and refresh TTL
-      await redis.sadd(taskListKey(demoUid), task.id)
-      await redis.expire(taskListKey(demoUid), KV_TTL_SECONDS)
-    } catch (error) {
-      console.error("[RedisCodexStore] saveTask error:", error)
-    }
+    await redis.set(taskKey(demoUid, task.id), task, { ex: KV_TTL_SECONDS })
+    await redis.sadd(taskListKey(demoUid), task.id)
+    await redis.expire(taskListKey(demoUid), KV_TTL_SECONDS)
   }
 
   async listTasks(demoUid: string): Promise<CodexTask[]> {
     logOp("Redis", "listTasks", demoUid)
     const redis = getRedisClient()
     if (!redis) return []
-    
-    try {
-      const taskIds = await redis.smembers(taskListKey(demoUid))
-      if (!taskIds || taskIds.length === 0) return []
+    const taskIds = await redis.smembers(taskListKey(demoUid))
+    if (!taskIds || taskIds.length === 0) return []
 
-      const tasks: CodexTask[] = []
-      for (const id of taskIds) {
-        const task = await redis.get<CodexTask>(taskKey(demoUid, id as string))
-        if (task) tasks.push(task)
-      }
-
-      tasks.sort((a, b) => b.createdAt - a.createdAt)
-      return tasks
-    } catch (error) {
-      console.error("[RedisCodexStore] listTasks error:", error)
-      return []
+    const tasks: CodexTask[] = []
+    for (const id of taskIds) {
+      const task = await redis.get<CodexTask>(taskKey(demoUid, id as string))
+      if (task) tasks.push(task)
     }
+    tasks.sort((a, b) => b.createdAt - a.createdAt)
+    return tasks
   }
 
   async getWorkspace(demoUid: string): Promise<WorkspaceSnapshot> {
     logOp("Redis", "getWorkspace", demoUid)
     const redis = getRedisClient()
     if (!redis) {
-      return {
-        files: { ...DEFAULT_WORKSPACE_FILES },
-        updatedAt: Date.now(),
-      }
+      return { files: { ...DEFAULT_WORKSPACE_FILES }, updatedAt: Date.now() }
     }
-    
-    try {
-      const existing = await redis.get<WorkspaceSnapshot>(workspaceKey(demoUid))
-      if (existing) return existing
+    const existing = await redis.get<WorkspaceSnapshot>(workspaceKey(demoUid))
+    if (existing) return existing
 
-      // Create default workspace with TTL
-      const workspace: WorkspaceSnapshot = {
-        files: { ...DEFAULT_WORKSPACE_FILES },
-        updatedAt: Date.now(),
-      }
-      await redis.set(workspaceKey(demoUid), workspace, { ex: KV_TTL_SECONDS })
-      return workspace
-    } catch (error) {
-      console.error("[RedisCodexStore] getWorkspace error:", error)
-      return {
-        files: { ...DEFAULT_WORKSPACE_FILES },
-        updatedAt: Date.now(),
-      }
+    const workspace: WorkspaceSnapshot = {
+      files: { ...DEFAULT_WORKSPACE_FILES },
+      updatedAt: Date.now(),
     }
+    await redis.set(workspaceKey(demoUid), workspace, { ex: KV_TTL_SECONDS })
+    return workspace
   }
 
-  async saveWorkspace(
-    demoUid: string,
-    workspace: WorkspaceSnapshot
-  ): Promise<void> {
+  async saveWorkspace(demoUid: string, workspace: WorkspaceSnapshot): Promise<void> {
     logOp("Redis", "saveWorkspace", demoUid)
     const redis = getRedisClient()
     if (!redis) return
-    
-    try {
-      await redis.set(workspaceKey(demoUid), workspace, { ex: KV_TTL_SECONDS })
-    } catch (error) {
-      console.error("[RedisCodexStore] saveWorkspace error:", error)
-    }
+    await redis.set(workspaceKey(demoUid), workspace, { ex: KV_TTL_SECONDS })
   }
 }
 
 /**
- * Singleton store instances (persists across requests)
+ * Resilient store that wraps RedisCodexStore with automatic MemoryCodexStore fallback.
+ * Same pattern as ResilientRedisStore in the chat store.
  */
-let memoryStoreInstance: MemoryCodexStore | null = null
-let redisStoreInstance: RedisCodexStore | null = null
-let storeInitLogged = false
+class ResilientCodexStore implements CodexStore {
+  private redis: RedisCodexStore
+  private fallback: MemoryCodexStore
+  private redisHealthy = true
+  private consecutiveFailures = 0
+  private lastRetryAt = 0
+  private fallbackWarningLogged = false
 
-function getMemoryStore(): MemoryCodexStore {
-  if (!memoryStoreInstance) {
-    memoryStoreInstance = new MemoryCodexStore()
-    if (!storeInitLogged) {
-      console.log("[CodexStore] Initialized in-memory store (development only)")
-      storeInitLogged = true
+  private static readonly FAILURE_THRESHOLD = 1
+  private static readonly RETRY_INTERVAL_MS = 30_000
+
+  constructor(redis: RedisCodexStore, fallback: MemoryCodexStore) {
+    this.redis = redis
+    this.fallback = fallback
+  }
+
+  private markRedisFailure(): void {
+    this.consecutiveFailures++
+    if (this.consecutiveFailures >= ResilientCodexStore.FAILURE_THRESHOLD && this.redisHealthy) {
+      this.redisHealthy = false
+      if (!this.fallbackWarningLogged) {
+        console.warn("[CodexStore:Resilient] Redis unreachable — falling back to in-memory store.")
+        this.fallbackWarningLogged = true
+      }
     }
   }
-  return memoryStoreInstance
-}
 
-function getRedisStore(): RedisCodexStore {
-  if (!redisStoreInstance) {
-    redisStoreInstance = new RedisCodexStore()
-    if (!storeInitLogged) {
-      console.log("[CodexStore] Initialized Redis store")
-      storeInitLogged = true
+  private markRedisSuccess(): void {
+    if (!this.redisHealthy) console.log("[CodexStore:Resilient] Redis connectivity restored")
+    this.redisHealthy = true
+    this.consecutiveFailures = 0
+  }
+
+  private shouldRetryRedis(): boolean {
+    if (this.redisHealthy) return true
+    const now = Date.now()
+    if (now - this.lastRetryAt >= ResilientCodexStore.RETRY_INTERVAL_MS) {
+      this.lastRetryAt = now
+      return true
+    }
+    return false
+  }
+
+  private async tryRedisOrFallback<T>(
+    operation: string,
+    redisFn: () => Promise<T>,
+    fallbackFn: () => Promise<T>,
+  ): Promise<T> {
+    if (!this.shouldRetryRedis()) return fallbackFn()
+    try {
+      const result = await redisFn()
+      this.markRedisSuccess()
+      return result
+    } catch (error) {
+      this.markRedisFailure()
+      console.error(`[CodexStore:Resilient] ${operation} Redis failed, using fallback:`,
+        error instanceof Error ? error.message : error)
+      return fallbackFn()
     }
   }
-  return redisStoreInstance
+
+  async getTask(demoUid: string, taskId: string): Promise<CodexTask | null> {
+    return this.tryRedisOrFallback("getTask",
+      () => this.redis.getTask(demoUid, taskId),
+      () => this.fallback.getTask(demoUid, taskId))
+  }
+
+  async saveTask(demoUid: string, task: CodexTask): Promise<void> {
+    await this.tryRedisOrFallback("saveTask",
+      async () => { await this.redis.saveTask(demoUid, task); await this.fallback.saveTask(demoUid, task) },
+      () => this.fallback.saveTask(demoUid, task))
+  }
+
+  async listTasks(demoUid: string): Promise<CodexTask[]> {
+    return this.tryRedisOrFallback("listTasks",
+      () => this.redis.listTasks(demoUid),
+      () => this.fallback.listTasks(demoUid))
+  }
+
+  async getWorkspace(demoUid: string): Promise<WorkspaceSnapshot> {
+    return this.tryRedisOrFallback("getWorkspace",
+      () => this.redis.getWorkspace(demoUid),
+      () => this.fallback.getWorkspace(demoUid))
+  }
+
+  async saveWorkspace(demoUid: string, workspace: WorkspaceSnapshot): Promise<void> {
+    await this.tryRedisOrFallback("saveWorkspace",
+      async () => { await this.redis.saveWorkspace(demoUid, workspace); await this.fallback.saveWorkspace(demoUid, workspace) },
+      () => this.fallback.saveWorkspace(demoUid, workspace))
+  }
 }
 
 /**
@@ -254,19 +281,55 @@ export interface CodexStore {
 }
 
 /**
+ * Singleton store instances (persists across requests)
+ */
+let memoryStoreInstance: MemoryCodexStore | null = null
+let redisStoreInstance: RedisCodexStore | null = null
+let resilientStoreInstance: ResilientCodexStore | null = null
+let storeInitLogged = false
+
+function getMemoryStore(): MemoryCodexStore {
+  if (!memoryStoreInstance) {
+    memoryStoreInstance = new MemoryCodexStore()
+  }
+  return memoryStoreInstance
+}
+
+function getRedisStore(): RedisCodexStore {
+  if (!redisStoreInstance) {
+    redisStoreInstance = new RedisCodexStore()
+  }
+  return redisStoreInstance
+}
+
+function getResilientStore(): ResilientCodexStore {
+  if (!resilientStoreInstance) {
+    resilientStoreInstance = new ResilientCodexStore(getRedisStore(), getMemoryStore())
+    if (!storeInitLogged) {
+      console.log("[CodexStore] Initialized resilient Redis store (with memory fallback)")
+      storeInitLogged = true
+    }
+  }
+  return resilientStoreInstance
+}
+
+/**
  * Get the appropriate store implementation
  *
- * Note: This function does NOT enforce the production check - that is done
- * by the index.ts wrapper. This allows the stores to be used directly in tests.
+ * When Redis is configured, returns a ResilientCodexStore that automatically
+ * falls back to MemoryCodexStore if Redis becomes unreachable.
  */
 export function getCodexStore(): CodexStore {
   if (isRedisConfigured()) {
-    return getRedisStore()
+    return getResilientStore()
   }
   if (isDevelopment()) {
+    if (!storeInitLogged) {
+      console.log("[CodexStore] Initialized in-memory store (development only)")
+      storeInitLogged = true
+    }
     return getMemoryStore()
   }
-  // This shouldn't happen if called through index.ts, but provide a fallback
   console.warn(
     "[CodexStore] WARNING: Using in-memory store in production. " +
       "Configure Redis env vars (KV_REST_API_URL/TOKEN or UPSTASH_REDIS_REST_URL/TOKEN) for durable storage."

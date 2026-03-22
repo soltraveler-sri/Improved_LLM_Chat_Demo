@@ -74,29 +74,31 @@ function extractFindQuery(text: string): string {
 }
 
 /**
- * Build a compact context string from a task's context summary
- * Used for ingesting task output into the chat chain
+ * Build a compact context string from a task's context summary.
+ * Written in first person so the model treats it as its own work,
+ * keeping the experience seamless for the user.
  */
 function buildTaskContextInput(task: CodexTask): string | null {
   const summary = task.contextSummary
   if (!summary) return null
 
   const lines: string[] = [
-    `Context from completed Codex task "${summary.title}":`,
+    `I just completed the coding task "${summary.title}". Here is what I did:`,
     "",
-    `Files generated: ${summary.filePaths.slice(0, 5).join(", ")}${summary.filePaths.length > 5 ? "..." : ""}`,
   ]
 
-  if (summary.languages.length > 0) {
-    lines.push(`Languages: ${summary.languages.join(", ")}`)
-  }
-
   if (summary.bullets.length > 0) {
-    lines.push("")
-    lines.push("Summary of what was built:")
     for (const bullet of summary.bullets.slice(0, 4)) {
       lines.push(`- ${bullet}`)
     }
+    lines.push("")
+  }
+
+  const filePaths = summary.filePaths.slice(0, 10)
+  lines.push(`Files created/modified: ${filePaths.join(", ")}${summary.filePaths.length > 10 ? ` and ${summary.filePaths.length - 10} more` : ""}`)
+
+  if (summary.languages.length > 0) {
+    lines.push(`Languages used: ${summary.languages.join(", ")}`)
   }
 
   return lines.join("\n")
@@ -263,6 +265,8 @@ function UnifiedDemoContent() {
   // PERSISTENCE STATE
   // ==========================================================================
   const storedThreadIdRef = useRef<string | null>(null)
+  /** Tracks chatIds we set ourselves via router.replace — skip loadChat for these */
+  const selfSetChatIdRef = useRef<string | null>(null)
 
   // ==========================================================================
   // SIDEBAR STATE
@@ -521,6 +525,12 @@ function UnifiedDemoContent() {
   useEffect(() => {
     async function loadChat() {
       if (!urlChatId) return
+
+      // Skip if we just set this chatId ourselves (thread already in local state)
+      if (selfSetChatIdRef.current === urlChatId) {
+        selfSetChatIdRef.current = null
+        return
+      }
 
       try {
         const res = await fetch(`/api/chats/${urlChatId}`)
@@ -965,7 +975,8 @@ function UnifiedDemoContent() {
       const id = await createStoredThread(`@codex: ${prompt.slice(0, 30)}...`)
       if (id) {
         storedThreadIdRef.current = id
-        // Push thread into URL so reload preserves the active chat
+        // Mark as self-set so loadChat effect skips re-fetching
+        selfSetChatIdRef.current = id
         router.replace(`/demos/unified?chatId=${id}`, { scroll: false })
         logAuditClient("5.5", "url_push_after_thread_create", {
           threadId: id,
@@ -1130,7 +1141,8 @@ function UnifiedDemoContent() {
       const id = await createStoredThread(threadTitle)
       if (id) {
         storedThreadIdRef.current = id
-        // Push thread into URL so reload preserves the active chat
+        // Mark as self-set so loadChat effect skips re-fetching
+        selfSetChatIdRef.current = id
         router.replace(`/demos/unified?chatId=${id}`, { scroll: false })
         logAuditClient("5.5", "url_push_after_thread_create", {
           threadId: id,
@@ -1183,6 +1195,9 @@ function UnifiedDemoContent() {
           messages: [...prev.messages, assistantMessage],
           lastResponseId: responseData.id,
         }))
+
+        // Stop typing indicator immediately now that the response is visible
+        setIsLoading(false)
 
         // Persist assistant message and update thread — await both
         const threadId = storedThreadIdRef.current
