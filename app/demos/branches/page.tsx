@@ -19,6 +19,7 @@ import type {
   BranchThread,
   SummarizeResponse,
 } from "@/lib/types"
+import { logAuditClient } from "@/lib/telemetry"
 
 function generateId(): string {
   return crypto.randomUUID()
@@ -168,7 +169,13 @@ export default function BranchesDemo() {
 
     // --- PERSISTENCE (await thread creation to prevent race) ---
     if (!storedThreadIdRef.current) {
+      const createStart = Date.now()
       const id = await createStoredThread()
+      logAuditClient("5.7", "branch_thread_create_awaited", {
+        threadId: id,
+        durationMs: Date.now() - createStart,
+        threadExistedBefore: false,
+      })
       if (id) {
         storedThreadIdRef.current = id
         persistMessage(id, {
@@ -179,6 +186,11 @@ export default function BranchesDemo() {
         })
       }
     } else {
+      logAuditClient("5.7", "branch_message_persisted", {
+        threadId: storedThreadIdRef.current,
+        messageRole: "user",
+        threadExistedBefore: true,
+      })
       persistMessage(storedThreadIdRef.current, {
         id: userMessage.localId,
         role: userMessage.role,
@@ -223,6 +235,12 @@ export default function BranchesDemo() {
       // --- PERSISTENCE (fire-and-forget, best-effort) ---
       // Persist assistant message and update lastResponseId
       if (storedThreadIdRef.current) {
+        logAuditClient("5.7", "branch_assistant_persist", {
+          threadId: storedThreadIdRef.current,
+          messageRole: "assistant",
+          threadRefAvailable: true,
+          responseId: responseData.id,
+        })
         persistMessage(storedThreadIdRef.current, {
           id: assistantMessage.localId,
           role: assistantMessage.role,
@@ -232,6 +250,11 @@ export default function BranchesDemo() {
         })
         updateStoredThread(storedThreadIdRef.current, {
           lastResponseId: responseData.id,
+        })
+      } else {
+        logAuditClient("5.7", "branch_assistant_persist_skipped", {
+          threadRefAvailable: false,
+          reason: "storedThreadIdRef still null — race condition if this fires",
         })
       }
       // --- END PERSISTENCE ---
