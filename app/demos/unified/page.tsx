@@ -36,6 +36,7 @@ import type { CodexTask, WorkspaceSnapshot } from "@/lib/codex/types"
 import type { StoredChatThread, StoredChatThreadMeta } from "@/lib/store/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { logAuditClient, flushAuditTelemetry } from "@/lib/telemetry"
+import { SessionChatCache } from "@/lib/session-cache"
 
 // =============================================================================
 // HELPERS
@@ -74,28 +75,40 @@ function extractFindQuery(text: string): string {
 }
 
 /**
- * Build a compact context string from a task's context summary.
- * Written in first person so the model treats it as its own work,
- * keeping the experience seamless for the user.
+ * Build a FULL context string from a completed codex task.
+ *
+ * Includes the complete file contents so the model has the same knowledge
+ * it would have if it had actually written the code. This is a demo-only
+ * approach — in production you'd use a smarter context window strategy.
  */
 function buildTaskContextInput(task: CodexTask): string | null {
   const summary = task.contextSummary
   if (!summary) return null
 
   const lines: string[] = [
-    `I just completed the coding task "${summary.title}". Here is what I did:`,
+    `I just completed the coding task "${summary.title}". Here is exactly what I did:`,
     "",
   ]
 
-  if (summary.bullets.length > 0) {
-    for (const bullet of summary.bullets.slice(0, 4)) {
-      lines.push(`- ${bullet}`)
-    }
+  // Include the implementation plan so the model understands the "why"
+  if (task.planMarkdown) {
+    lines.push("## Implementation Plan")
+    lines.push(task.planMarkdown)
     lines.push("")
   }
 
-  const filePaths = summary.filePaths.slice(0, 10)
-  lines.push(`Files created/modified: ${filePaths.join(", ")}${summary.filePaths.length > 10 ? ` and ${summary.filePaths.length - 10} more` : ""}`)
+  // Include FULL file contents for every changed file
+  if (task.changes.length > 0) {
+    lines.push("## Files Created/Modified")
+    lines.push("")
+    for (const change of task.changes) {
+      lines.push(`### ${change.path}`)
+      lines.push("```")
+      lines.push(change.after)
+      lines.push("```")
+      lines.push("")
+    }
+  }
 
   if (summary.languages.length > 0) {
     lines.push(`Languages used: ${summary.languages.join(", ")}`)
@@ -128,13 +141,40 @@ async function createStoredThread(title?: string): Promise<string | null> {
     })
     if (!res.ok) {
       console.error("[Persist] createStoredThread failed:", res.status)
-      return null
+      // Fallback: create locally in session cache
+      const localThread = {
+        id: generateId(),
+        title: title || "New Chat",
+        category: "recent" as const,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        messages: [],
+      }
+      SessionChatCache.saveThread(localThread)
+      SessionChatCache.trackEvent("localOnlyThreads")
+      return localThread.id
     }
     const data = await res.json()
-    return data.thread?.id ?? null
+    const threadId = data.thread?.id ?? null
+    // Write-through: cache locally for resilience
+    if (data.thread) {
+      SessionChatCache.saveThread(data.thread)
+    }
+    return threadId
   } catch (err) {
     console.error("[Persist] createStoredThread error:", err)
-    return null
+    // Fallback: create locally in session cache
+    const localThread = {
+      id: generateId(),
+      title: title || "New Chat",
+      category: "recent" as const,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      messages: [],
+    }
+    SessionChatCache.saveThread(localThread)
+    SessionChatCache.trackEvent("localOnlyThreads")
+    return localThread.id
   }
 }
 
@@ -151,6 +191,14 @@ async function persistMessage(
     contextMeta?: { branchId: string; branchTitle: string; mergeType: "summary" | "full" }
   }
 ): Promise<boolean> {
+  // Write-through: always cache locally (immediate, synchronous)
+  SessionChatCache.appendMessage(threadId, {
+    id: message.id,
+    role: message.role as "user" | "assistant" | "context",
+    text: message.text,
+    createdAt: message.createdAt,
+    responseId: message.responseId,
+  })
   try {
     const res = await fetch(`/api/chats/${threadId}/messages`, {
       method: "POST",
@@ -171,6 +219,8 @@ async function updateStoredThread(
   threadId: string,
   updates: { title?: string; summary?: string; lastResponseId?: string | null }
 ): Promise<boolean> {
+  // Write-through: update session cache immediately
+  SessionChatCache.updateThread(threadId, updates)
   try {
     const res = await fetch(`/api/chats/${threadId}`, {
       method: "PATCH",
@@ -290,16 +340,27 @@ function UnifiedDemoContent() {
     }
   }, [])
 
-  // Fetch threads for sidebar
+  // Fetch threads for sidebar, merging with session cache
   const fetchThreads = useCallback(async () => {
     try {
-      const res = await fetch("/api/chats")
-      if (res.ok) {
-        const data = await res.json()
-        setThreads(data.threads || [])
-      } else {
-        console.error("[fetchThreads] API returned:", res.status)
+      let serverThreads: StoredChatThreadMeta[] = []
+      try {
+        const res = await fetch("/api/chats")
+        if (res.ok) {
+          const data = await res.json()
+          serverThreads = data.threads || []
+        }
+      } catch {
+        // Server unreachable — session cache will fill in
       }
+      // Merge with session cache (union by ID, server wins)
+      const localThreads = SessionChatCache.listThreads()
+      const mergedMap = new Map<string, StoredChatThreadMeta>()
+      for (const t of localThreads) mergedMap.set(t.id, t)
+      for (const t of serverThreads) mergedMap.set(t.id, t)
+      const merged = Array.from(mergedMap.values())
+      merged.sort((a, b) => b.updatedAt - a.updatedAt)
+      setThreads(merged)
     } catch (error) {
       console.error("[fetchThreads] Failed:", error)
     } finally {
@@ -532,82 +593,100 @@ function UnifiedDemoContent() {
         return
       }
 
+      // Try server first, then fall back to session cache
+      let thread: StoredChatThread | null = null
+      let source = "server"
+
       try {
         const res = await fetch(`/api/chats/${urlChatId}`)
-        if (!res.ok) {
-          toast.error("Failed to load chat")
-          return
+        if (res.ok) {
+          const data = await res.json()
+          thread = data.thread as StoredChatThread
         }
-
-        const data = await res.json()
-        const thread = data.thread as StoredChatThread
-
-        if (thread) {
-          // Convert stored messages to ChatMessage format, preserving task/context metadata
-          const loadedMessages: UnifiedMessage[] = thread.messages.map((m) => ({
-            localId: m.id,
-            role: m.role as "user" | "assistant" | "context",
-            text: m.text,
-            createdAt: m.createdAt,
-            responseId: m.responseId,
-            ...(m.taskId ? { taskId: m.taskId } : {}),
-            ...(m.isTaskCard ? { isTaskCard: m.isTaskCard } : {}),
-            ...(m.contextMeta ? { contextMeta: m.contextMeta } : {}),
-          }))
-
-          // Restore task objects for any task card messages
-          const taskCardMessages = loadedMessages.filter((m) => m.isTaskCard && m.taskId)
-          for (const msg of taskCardMessages) {
-            if (msg.taskId && !msg.taskId.startsWith("placeholder_")) {
-              try {
-                const taskRes = await fetch(`/api/codex/tasks/${msg.taskId}`)
-                if (taskRes.ok) {
-                  const taskData = await taskRes.json()
-                  setTasks((prev) => ({ ...prev, [msg.taskId!]: taskData.task }))
-                  logAuditClient("5.6", "task_card_restored_on_load", {
-                    taskId: msg.taskId,
-                    taskStatus: taskData.task?.status,
-                    restored: true,
-                  })
-                } else {
-                  logAuditClient("5.6", "task_card_restore_failed", {
-                    taskId: msg.taskId,
-                    status: taskRes.status,
-                  })
-                }
-              } catch {
-                logAuditClient("5.6", "task_card_restore_failed", {
-                  taskId: msg.taskId,
-                  error: "fetch_error",
-                })
-              }
-            }
-          }
-
-          setState({
-            messages: loadedMessages,
-            lastResponseId: thread.lastResponseId || null,
-          })
-          lastResponseIdRef.current = thread.lastResponseId || null
-
-          storedThreadIdRef.current = thread.id
-
-          logAuditClient("5.5", "chat_loaded_from_url", {
-            urlChatId,
-            threadId: thread.id,
-            messageCount: loadedMessages.length,
-            lastResponseId: thread.lastResponseId || null,
-            hasTaskCards: taskCardMessages.length,
-            hasContextMeta: loadedMessages.filter((m) => m.contextMeta).length,
-          })
-
-          // Clear finder state
-          setFinderOptions([])
-        }
-      } catch (error) {
-        console.error("Failed to load chat:", error)
-        toast.error("Failed to load chat")
+      } catch {
+        // Server unreachable — will try session cache
       }
+
+      // Fallback to session cache if server failed
+      if (!thread) {
+        const cached = SessionChatCache.getThread(urlChatId)
+        if (cached) {
+          thread = cached
+          source = "session_cache"
+          SessionChatCache.trackEvent("threadCacheFallbacks")
+        }
+      }
+
+      if (!thread) {
+        // Both sources failed — silently skip (no toast)
+        // The thread may appear later when Redis recovers
+        logAuditClient("5.9", "chat_load_both_failed", {
+          chatId: urlChatId.slice(0, 8),
+        })
+        return
+      }
+
+      // Convert stored messages to ChatMessage format, preserving task/context metadata
+      const loadedMessages: UnifiedMessage[] = thread.messages.map((m) => ({
+        localId: m.id,
+        role: m.role as "user" | "assistant" | "context",
+        text: m.text,
+        createdAt: m.createdAt,
+        responseId: m.responseId,
+        ...(m.taskId ? { taskId: m.taskId } : {}),
+        ...(m.isTaskCard ? { isTaskCard: m.isTaskCard } : {}),
+        ...(m.contextMeta ? { contextMeta: m.contextMeta } : {}),
+      }))
+
+      // Restore task objects for any task card messages
+      const taskCardMessages = loadedMessages.filter((m) => m.isTaskCard && m.taskId)
+      for (const msg of taskCardMessages) {
+        if (msg.taskId && !msg.taskId.startsWith("placeholder_")) {
+          try {
+            const taskRes = await fetch(`/api/codex/tasks/${msg.taskId}`)
+            if (taskRes.ok) {
+              const taskData = await taskRes.json()
+              setTasks((prev) => ({ ...prev, [msg.taskId!]: taskData.task }))
+              logAuditClient("5.6", "task_card_restored_on_load", {
+                taskId: msg.taskId,
+                taskStatus: taskData.task?.status,
+                restored: true,
+              })
+            } else {
+              logAuditClient("5.6", "task_card_restore_failed", {
+                taskId: msg.taskId,
+                status: taskRes.status,
+              })
+            }
+          } catch {
+            logAuditClient("5.6", "task_card_restore_failed", {
+              taskId: msg.taskId,
+              error: "fetch_error",
+            })
+          }
+        }
+      }
+
+      setState({
+        messages: loadedMessages,
+        lastResponseId: thread.lastResponseId || null,
+      })
+      lastResponseIdRef.current = thread.lastResponseId || null
+
+      storedThreadIdRef.current = thread.id
+
+      logAuditClient("5.5", "chat_loaded_from_url", {
+        urlChatId,
+        threadId: thread.id,
+        source,
+        messageCount: loadedMessages.length,
+        lastResponseId: thread.lastResponseId || null,
+        hasTaskCards: taskCardMessages.length,
+        hasContextMeta: loadedMessages.filter((m) => m.contextMeta).length,
+      })
+
+      // Clear finder state
+      setFinderOptions([])
     }
 
     loadChat()
@@ -861,10 +940,21 @@ function UnifiedDemoContent() {
     const currentRequestId = ++requestIdRef.current
 
     try {
+      // Include local session threads as supplementary candidates
+      const localThreads = SessionChatCache.listFullThreads().map((t) => ({
+        id: t.id,
+        title: t.title,
+        summary: t.summary || "",
+        category: t.category,
+        createdAt: t.createdAt,
+        updatedAt: t.updatedAt,
+        messages: t.messages.map((m) => ({ role: m.role, text: m.text })),
+      }))
+
       const res = await fetch("/api/chats/find", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query }),
+        body: JSON.stringify({ query, localThreads }),
       })
 
       if (requestIdRef.current !== currentRequestId) return
@@ -1102,6 +1192,14 @@ function UnifiedDemoContent() {
           durationMs: Date.now() - ingestionStart,
           inputStillDisabled: true, // isLoading is still true here
         })
+
+        // Update thread title with the codex task's generated title
+        if (storedThreadIdRef.current && taskForIngestion.title) {
+          updateStoredThread(storedThreadIdRef.current, {
+            title: `@codex: ${taskForIngestion.title}`,
+          })
+          fetchThreads()
+        }
       }
 
       setIsLoading(false)
@@ -1221,6 +1319,29 @@ function UnifiedDemoContent() {
             lastResponseId: responseData.id,
             summary: summaryText,
           })
+
+          // Auto-generate a clean title after the first exchange (fire-and-forget)
+          if (allMsgs.length <= 2) {
+            fetch("/api/chats/generate-title", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                userMessage: userText.slice(0, 500),
+                assistantMessage: responseData.output_text.slice(0, 500),
+              }),
+            })
+              .then((r) => r.json())
+              .then((data) => {
+                if (data.title) {
+                  updateStoredThread(threadId, { title: data.title })
+                  fetchThreads()
+                }
+              })
+              .catch(() => {
+                // Non-critical — title remains as first-message truncation
+              })
+          }
+
           // Refresh sidebar so the thread shows updated title/time
           fetchThreads()
         }
