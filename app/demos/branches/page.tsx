@@ -20,6 +20,7 @@ import type {
   SummarizeResponse,
 } from "@/lib/types"
 import { logAuditClient } from "@/lib/telemetry"
+import { SessionChatCache } from "@/lib/session-cache"
 
 function generateId(): string {
   return crypto.randomUUID()
@@ -42,12 +43,49 @@ async function createStoredThread(title?: string): Promise<string | null> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: title || "New Chat", category: "recent" }),
     })
-    if (!res.ok) return null
+    if (!res.ok) {
+      // Server failed — create locally in session cache so /find still works
+      const localThread = {
+        id: generateId(),
+        title: title || "New Chat",
+        category: "recent" as const,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        messages: [],
+      }
+      SessionChatCache.saveThread(localThread)
+      SessionChatCache.trackEvent("localOnlyThreads")
+      logAuditClient("5.9", "thread_created_local_only", {
+        threadId: localThread.id,
+        reason: "server_error",
+        httpStatus: res.status,
+      })
+      return localThread.id
+    }
     const data = await res.json()
-    return data.thread?.id ?? null
+    const threadId = data.thread?.id ?? null
+    // Write-through: cache the server-created thread locally
+    if (data.thread) {
+      SessionChatCache.saveThread(data.thread)
+    }
+    return threadId
   } catch {
-    // Silently ignore - persistence is best-effort
-    return null
+    // Network error — create locally in session cache
+    const localThread = {
+      id: generateId(),
+      title: title || "New Chat",
+      category: "recent" as const,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      messages: [],
+    }
+    SessionChatCache.saveThread(localThread)
+    SessionChatCache.trackEvent("localOnlyThreads")
+    logAuditClient("5.9", "thread_created_local_only", {
+      threadId: localThread.id,
+      reason: "network_error",
+    })
+    return localThread.id
   }
 }
 
@@ -58,13 +96,21 @@ function persistMessage(
   threadId: string,
   message: { id: string; role: string; text: string; createdAt: number; responseId?: string }
 ): void {
-  // Fire and forget - don't await
+  // Write-through: always cache locally (immediate, synchronous)
+  SessionChatCache.appendMessage(threadId, {
+    id: message.id,
+    role: message.role as "user" | "assistant" | "context",
+    text: message.text,
+    createdAt: message.createdAt,
+    responseId: message.responseId,
+  })
+  // Fire and forget to server - don't await
   fetch(`/api/chats/${threadId}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(message),
   }).catch(() => {
-    // Silently ignore - persistence is best-effort
+    // Silently ignore - session cache already has the data
   })
 }
 
@@ -75,13 +121,15 @@ function updateStoredThread(
   threadId: string,
   updates: { title?: string; lastResponseId?: string | null }
 ): void {
-  // Fire and forget - don't await
+  // Write-through: always cache locally (immediate, synchronous)
+  SessionChatCache.updateThread(threadId, updates)
+  // Fire and forget to server - don't await
   fetch(`/api/chats/${threadId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(updates),
   }).catch(() => {
-    // Silently ignore - persistence is best-effort
+    // Silently ignore - session cache already has the data
   })
 }
 
@@ -538,6 +586,18 @@ export default function BranchesDemo() {
 
   // Reset chat state
   const handleReset = () => {
+    // Log session cache diagnostics snapshot before clearing
+    const diag = SessionChatCache.getDiagnostics()
+    const snapshot = SessionChatCache.getSnapshot()
+    const hasActivity = Object.values(diag).some((v) => v > 0)
+    if (hasActivity) {
+      logAuditClient("5.9", "session_cache_diagnostics", {
+        ...diag,
+        ...snapshot,
+        trigger: "new_chat",
+      })
+    }
+
     setState({
       messages: [],
       lastResponseId: null,

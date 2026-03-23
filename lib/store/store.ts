@@ -121,31 +121,25 @@ class RedisStore implements ChatStore {
     logOp("Redis", "listThreads", demoUid)
     const redis = getRedisClient()
     if (!redis) return []
-    
-    try {
-      const threadIds = await redis.smembers(threadListKey(demoUid))
-      if (!threadIds || threadIds.length === 0) return []
 
-      const threads: StoredChatThreadMeta[] = []
-      for (const id of threadIds) {
-        const thread = await redis.get<StoredChatThread>(
-          threadKey(demoUid, id as string)
-        )
-        if (thread) {
-          // Return metadata without messages
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
-          const { messages: _, ...meta } = thread
-          threads.push(meta)
-        }
+    // Let errors propagate so ResilientRedisStore can detect and fall back
+    const threadIds = await redis.smembers(threadListKey(demoUid))
+    if (!threadIds || threadIds.length === 0) return []
+
+    const threads: StoredChatThreadMeta[] = []
+    for (const id of threadIds) {
+      const thread = await redis.get<StoredChatThread>(
+        threadKey(demoUid, id as string)
+      )
+      if (thread) {
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { messages: _, ...meta } = thread
+        threads.push(meta)
       }
-
-      // Sort by updatedAt descending
-      threads.sort((a, b) => b.updatedAt - a.updatedAt)
-      return threads
-    } catch (error) {
-      console.error("[RedisStore] listThreads error:", error)
-      return []
     }
+
+    threads.sort((a, b) => b.updatedAt - a.updatedAt)
+    return threads
   }
 
   async getThread(
@@ -155,13 +149,8 @@ class RedisStore implements ChatStore {
     logOp("Redis", "getThread", demoUid, `threadId=${threadId.slice(0, 8)}`)
     const redis = getRedisClient()
     if (!redis) return null
-    
-    try {
-      return await redis.get<StoredChatThread>(threadKey(demoUid, threadId))
-    } catch (error) {
-      console.error("[RedisStore] getThread error:", error)
-      return null
-    }
+
+    return await redis.get<StoredChatThread>(threadKey(demoUid, threadId))
   }
 
   async createThread(
@@ -183,16 +172,11 @@ class RedisStore implements ChatStore {
     logOp("Redis", "createThread", demoUid, `threadId=${thread.id.slice(0, 8)}`)
     const redis = getRedisClient()
     if (!redis) return thread
-    
-    try {
-      // Set thread with TTL
-      await redis.set(threadKey(demoUid, thread.id), thread, { ex: KV_TTL_SECONDS })
-      // Set index with TTL (refresh on each write)
-      await redis.sadd(threadListKey(demoUid), thread.id)
-      await redis.expire(threadListKey(demoUid), KV_TTL_SECONDS)
-    } catch (error) {
-      console.error("[RedisStore] createThread error:", error)
-    }
+
+    // Let errors propagate so ResilientRedisStore can detect and fall back
+    await redis.set(threadKey(demoUid, thread.id), thread, { ex: KV_TTL_SECONDS })
+    await redis.sadd(threadListKey(demoUid), thread.id)
+    await redis.expire(threadListKey(demoUid), KV_TTL_SECONDS)
 
     return thread
   }
@@ -210,25 +194,20 @@ class RedisStore implements ChatStore {
     )
     const redis = getRedisClient()
     if (!redis) return
-    
-    try {
-      const thread = await this.getThread(demoUid, threadId)
-      if (!thread) {
-        console.warn("[RedisStore] appendMessage: thread not found", threadId)
-        return
-      }
 
-      thread.messages.push(message)
-      thread.updatedAt = Date.now()
-      if (message.responseId) {
-        thread.lastResponseId = message.responseId
-      }
-
-      // Update with TTL refresh
-      await redis.set(threadKey(demoUid, threadId), thread, { ex: KV_TTL_SECONDS })
-    } catch (error) {
-      console.error("[RedisStore] appendMessage error:", error)
+    const thread = await this.getThread(demoUid, threadId)
+    if (!thread) {
+      console.warn("[RedisStore] appendMessage: thread not found", threadId)
+      return
     }
+
+    thread.messages.push(message)
+    thread.updatedAt = Date.now()
+    if (message.responseId) {
+      thread.lastResponseId = message.responseId
+    }
+
+    await redis.set(threadKey(demoUid, threadId), thread, { ex: KV_TTL_SECONDS })
   }
 
   async updateThread(
@@ -239,65 +218,45 @@ class RedisStore implements ChatStore {
     logOp("Redis", "updateThread", demoUid, `threadId=${threadId.slice(0, 8)}`)
     const redis = getRedisClient()
     if (!redis) return
-    
-    try {
-      const thread = await this.getThread(demoUid, threadId)
-      if (!thread) {
-        console.warn("[RedisStore] updateThread: thread not found", threadId)
-        return
-      }
 
-      const updated = {
-        ...thread,
-        ...partial,
-        updatedAt: Date.now(),
-      }
-
-      // Update with TTL refresh
-      await redis.set(threadKey(demoUid, threadId), updated, { ex: KV_TTL_SECONDS })
-    } catch (error) {
-      console.error("[RedisStore] updateThread error:", error)
+    const thread = await this.getThread(demoUid, threadId)
+    if (!thread) {
+      console.warn("[RedisStore] updateThread: thread not found", threadId)
+      return
     }
+
+    const updated = {
+      ...thread,
+      ...partial,
+      updatedAt: Date.now(),
+    }
+
+    await redis.set(threadKey(demoUid, threadId), updated, { ex: KV_TTL_SECONDS })
   }
 
   async deleteThread(demoUid: string, threadId: string): Promise<void> {
     logOp("Redis", "deleteThread", demoUid, `threadId=${threadId.slice(0, 8)}`)
     const redis = getRedisClient()
     if (!redis) return
-    
-    try {
-      await redis.del(threadKey(demoUid, threadId))
-      await redis.srem(threadListKey(demoUid), threadId)
-    } catch (error) {
-      console.error("[RedisStore] deleteThread error:", error)
-    }
+
+    await redis.del(threadKey(demoUid, threadId))
+    await redis.srem(threadListKey(demoUid), threadId)
   }
 
   async getStacksMeta(demoUid: string): Promise<StacksMeta> {
     logOp("Redis", "getStacksMeta", demoUid)
     const redis = getRedisClient()
     if (!redis) {
-      return {
-        lastRefreshAt: null,
-        counts: calculateCounts([]),
-      }
+      return { lastRefreshAt: null, counts: calculateCounts([]) }
     }
-    
-    try {
-      const meta = await redis.get<{ lastRefreshAt: number | null }>(
-        stacksMetaKey(demoUid)
-      )
-      const threads = await this.listThreads(demoUid)
-      return {
-        lastRefreshAt: meta?.lastRefreshAt ?? null,
-        counts: calculateCounts(threads),
-      }
-    } catch (error) {
-      console.error("[RedisStore] getStacksMeta error:", error)
-      return {
-        lastRefreshAt: null,
-        counts: calculateCounts([]),
-      }
+
+    const meta = await redis.get<{ lastRefreshAt: number | null }>(
+      stacksMetaKey(demoUid)
+    )
+    const threads = await this.listThreads(demoUid)
+    return {
+      lastRefreshAt: meta?.lastRefreshAt ?? null,
+      counts: calculateCounts(threads),
     }
   }
 
@@ -305,12 +264,8 @@ class RedisStore implements ChatStore {
     logOp("Redis", "setLastStacksRefreshAt", demoUid)
     const redis = getRedisClient()
     if (!redis) return
-    
-    try {
-      await redis.set(stacksMetaKey(demoUid), { lastRefreshAt: ts }, { ex: KV_TTL_SECONDS })
-    } catch (error) {
-      console.error("[RedisStore] setLastStacksRefreshAt error:", error)
-    }
+
+    await redis.set(stacksMetaKey(demoUid), { lastRefreshAt: ts }, { ex: KV_TTL_SECONDS })
   }
 }
 
@@ -437,19 +392,200 @@ class MemoryStore implements ChatStore {
 }
 
 /**
+ * Resilient store that wraps RedisStore with automatic MemoryStore fallback.
+ *
+ * When Redis is configured but unreachable (DNS failure, timeout, etc.),
+ * this store detects the failure and transparently switches to an in-memory
+ * fallback so the application continues to function. It periodically retries
+ * Redis to recover when connectivity is restored.
+ */
+class ResilientRedisStore implements ChatStore {
+  private redis: RedisStore
+  private fallback: MemoryStore
+  private redisHealthy = true
+  private consecutiveFailures = 0
+  private lastRetryAt = 0
+  private fallbackWarningLogged = false
+
+  /** After this many consecutive failures, switch to fallback */
+  private static readonly FAILURE_THRESHOLD = 1
+  /** Minimum interval (ms) between Redis retry attempts after fallback */
+  private static readonly RETRY_INTERVAL_MS = 30_000
+
+  constructor(redis: RedisStore, fallback: MemoryStore) {
+    this.redis = redis
+    this.fallback = fallback
+  }
+
+  /** Whether we're currently using the fallback store */
+  get isUsingFallback(): boolean {
+    return !this.redisHealthy
+  }
+
+  private markRedisFailure(): void {
+    this.consecutiveFailures++
+    if (this.consecutiveFailures >= ResilientRedisStore.FAILURE_THRESHOLD) {
+      if (this.redisHealthy) {
+        this.redisHealthy = false
+        if (!this.fallbackWarningLogged) {
+          console.warn(
+            "[ChatStore:Resilient] Redis unreachable — falling back to in-memory store. " +
+            "Data will persist within this serverless instance but not across cold starts."
+          )
+          this.fallbackWarningLogged = true
+        }
+      }
+    }
+  }
+
+  private markRedisSuccess(): void {
+    if (!this.redisHealthy) {
+      console.log("[ChatStore:Resilient] Redis connectivity restored")
+    }
+    this.redisHealthy = true
+    this.consecutiveFailures = 0
+  }
+
+  private shouldRetryRedis(): boolean {
+    if (this.redisHealthy) return true
+    const now = Date.now()
+    if (now - this.lastRetryAt >= ResilientRedisStore.RETRY_INTERVAL_MS) {
+      this.lastRetryAt = now
+      return true
+    }
+    return false
+  }
+
+  /**
+   * Try a Redis operation; on failure, fall back to memory store.
+   * For read operations, the memory store result is returned (may be empty on first fallback).
+   * For write operations, we always write to the fallback too so data is available.
+   */
+  private async tryRedisOrFallback<T>(
+    operation: string,
+    redisFn: () => Promise<T>,
+    fallbackFn: () => Promise<T>,
+    isWrite = false,
+  ): Promise<T> {
+    // If Redis is unhealthy and we shouldn't retry yet, go straight to fallback
+    if (!this.shouldRetryRedis()) {
+      return fallbackFn()
+    }
+
+    try {
+      const result = await redisFn()
+      this.markRedisSuccess()
+      return result
+    } catch (error) {
+      this.markRedisFailure()
+      console.error(`[ChatStore:Resilient] ${operation} Redis failed, using fallback:`,
+        error instanceof Error ? error.message : error)
+      return fallbackFn()
+    }
+  }
+
+  async listThreads(demoUid: string): Promise<StoredChatThreadMeta[]> {
+    return this.tryRedisOrFallback(
+      "listThreads",
+      () => this.redis.listThreads(demoUid),
+      () => this.fallback.listThreads(demoUid),
+    )
+  }
+
+  async getThread(demoUid: string, threadId: string): Promise<StoredChatThread | null> {
+    return this.tryRedisOrFallback(
+      "getThread",
+      () => this.redis.getThread(demoUid, threadId),
+      () => this.fallback.getThread(demoUid, threadId),
+    )
+  }
+
+  async createThread(demoUid: string, initial: Partial<StoredChatThread>): Promise<StoredChatThread> {
+    // Always write to fallback so data is available if Redis fails later
+    const thread = await this.tryRedisOrFallback(
+      "createThread",
+      async () => {
+        const result = await this.redis.createThread(demoUid, initial)
+        // Mirror to fallback for resilience
+        await this.fallback.createThread(demoUid, { ...result })
+        return result
+      },
+      () => this.fallback.createThread(demoUid, initial),
+      true,
+    )
+    return thread
+  }
+
+  async appendMessage(demoUid: string, threadId: string, message: StoredChatMessage): Promise<void> {
+    await this.tryRedisOrFallback(
+      "appendMessage",
+      async () => {
+        await this.redis.appendMessage(demoUid, threadId, message)
+        // Mirror to fallback
+        await this.fallback.appendMessage(demoUid, threadId, message)
+      },
+      () => this.fallback.appendMessage(demoUid, threadId, message),
+      true,
+    )
+  }
+
+  async updateThread(demoUid: string, threadId: string, partial: Partial<StoredChatThread>): Promise<void> {
+    await this.tryRedisOrFallback(
+      "updateThread",
+      async () => {
+        await this.redis.updateThread(demoUid, threadId, partial)
+        // Mirror to fallback
+        await this.fallback.updateThread(demoUid, threadId, partial)
+      },
+      () => this.fallback.updateThread(demoUid, threadId, partial),
+      true,
+    )
+  }
+
+  async deleteThread(demoUid: string, threadId: string): Promise<void> {
+    await this.tryRedisOrFallback(
+      "deleteThread",
+      async () => {
+        await this.redis.deleteThread(demoUid, threadId)
+        await this.fallback.deleteThread(demoUid, threadId)
+      },
+      () => this.fallback.deleteThread(demoUid, threadId),
+      true,
+    )
+  }
+
+  async getStacksMeta(demoUid: string): Promise<StacksMeta> {
+    return this.tryRedisOrFallback(
+      "getStacksMeta",
+      () => this.redis.getStacksMeta(demoUid),
+      () => this.fallback.getStacksMeta(demoUid),
+    )
+  }
+
+  async setLastStacksRefreshAt(demoUid: string, ts: number): Promise<void> {
+    await this.tryRedisOrFallback(
+      "setLastStacksRefreshAt",
+      async () => {
+        await this.redis.setLastStacksRefreshAt(demoUid, ts)
+        await this.fallback.setLastStacksRefreshAt(demoUid, ts)
+      },
+      () => this.fallback.setLastStacksRefreshAt(demoUid, ts),
+      true,
+    )
+  }
+}
+
+/**
  * Singleton store instances (persists across requests)
  */
 let memoryStoreInstance: MemoryStore | null = null
 let redisStoreInstance: RedisStore | null = null
+let resilientStoreInstance: ResilientRedisStore | null = null
 let storeInitLogged = false
 
 function getMemoryStore(): MemoryStore {
   if (!memoryStoreInstance) {
     memoryStoreInstance = new MemoryStore()
-    if (!storeInitLogged) {
-      console.log("[ChatStore] Initialized in-memory store (development only)")
-      storeInitLogged = true
-    }
   }
   return memoryStoreInstance
 }
@@ -457,28 +593,38 @@ function getMemoryStore(): MemoryStore {
 function getRedisStore(): RedisStore {
   if (!redisStoreInstance) {
     redisStoreInstance = new RedisStore()
+  }
+  return redisStoreInstance
+}
+
+function getResilientStore(): ResilientRedisStore {
+  if (!resilientStoreInstance) {
+    resilientStoreInstance = new ResilientRedisStore(getRedisStore(), getMemoryStore())
     if (!storeInitLogged) {
-      console.log("[ChatStore] Initialized Redis store")
+      console.log("[ChatStore] Initialized resilient Redis store (with memory fallback)")
       storeInitLogged = true
     }
   }
-  return redisStoreInstance
+  return resilientStoreInstance
 }
 
 /**
  * Get the appropriate store implementation based on environment
  *
- * Note: This function does NOT enforce the production check - that is done
- * by the index.ts wrapper. This allows the stores to be used directly in tests.
+ * When Redis is configured, returns a ResilientRedisStore that automatically
+ * falls back to MemoryStore if Redis becomes unreachable.
  */
 export function getChatStore(): ChatStore {
   if (isRedisConfigured()) {
-    return getRedisStore()
+    return getResilientStore()
   }
   if (isDevelopment()) {
+    if (!storeInitLogged) {
+      console.log("[ChatStore] Initialized in-memory store (development only)")
+      storeInitLogged = true
+    }
     return getMemoryStore()
   }
-  // This shouldn't happen if called through index.ts, but provide a fallback
   console.warn(
     "[ChatStore] WARNING: Using in-memory store in production. " +
       "Configure Redis env vars (KV_REST_API_URL/TOKEN or UPSTASH_REDIS_REST_URL/TOKEN) for durable storage."

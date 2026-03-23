@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getChatStore } from "@/lib/store"
 import type { StoredChatMessage } from "@/lib/store"
+import { logAuditServer } from "@/lib/telemetry"
 
 /**
  * Helper to get demo_uid from cookies
@@ -41,13 +42,34 @@ export async function POST(
 
     const store = getChatStore()
 
-    // Check if thread exists
-    const existing = await store.getThread(demoUid, id)
+    // Check if thread exists — if not, auto-create it (upsert).
+    // This handles the case where the thread was created in the client's
+    // session cache but the server store never received it (Redis down).
+    let existing = await store.getThread(demoUid, id)
     if (!existing) {
-      return NextResponse.json(
-        { error: "Thread not found" },
-        { status: 404 }
-      )
+      try {
+        existing = await store.createThread(demoUid, {
+          id,
+          title: "New Chat",
+          category: "recent",
+          messages: [],
+        })
+        logAuditServer("5.9", "thread_upsert_on_message", {
+          threadId: id.slice(0, 8),
+          demoUid: demoUid.slice(0, 8),
+          messageRole: body.role,
+        })
+      } catch {
+        logAuditServer("5.9", "thread_upsert_failed", {
+          threadId: id.slice(0, 8),
+          demoUid: demoUid.slice(0, 8),
+        })
+        // If auto-create also fails, return 404
+        return NextResponse.json(
+          { error: "Thread not found" },
+          { status: 404 }
+        )
+      }
     }
 
     const message: StoredChatMessage = {

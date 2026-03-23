@@ -17,6 +17,32 @@ import { logAuditClient } from "@/lib/telemetry"
 import { FinderOptionCard, type FinderOption } from "./finder-option-card"
 import type { StoredChatThread } from "@/lib/store/types"
 import { CATEGORY_LABELS, type StoredChatCategory } from "@/lib/store/types"
+import { SessionChatCache } from "@/lib/session-cache"
+
+/** Helper to build localThreads payload and log telemetry for /find */
+function getLocalThreadsForFind(query: string) {
+  const localThreads = SessionChatCache.listFullThreads().map((t) => ({
+    id: t.id,
+    title: t.title,
+    summary: t.summary || "",
+    category: t.category,
+    createdAt: t.createdAt,
+    updatedAt: t.updatedAt,
+    messages: t.messages.map((m) => ({
+      role: m.role,
+      text: m.text,
+    })),
+  }))
+  if (localThreads.length > 0) {
+    SessionChatCache.trackEvent("findWithLocalThreads")
+    logAuditClient("5.9", "find_with_local_threads", {
+      query: query.slice(0, 50),
+      localThreadCount: localThreads.length,
+      localThreadIds: localThreads.map((t) => t.id.slice(0, 8)),
+    })
+  }
+  return localThreads
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -312,10 +338,13 @@ export function FinderView({
     const currentRequestId = ++requestIdRef.current
 
     try {
+      // Include local session threads as supplementary candidates
+      const localThreads = getLocalThreadsForFind(query)
+
       const findRes = await fetch("/api/chats/find", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query }),
+        body: JSON.stringify({ query, localThreads }),
       })
 
       // Check if this request is still the latest
@@ -366,10 +395,14 @@ export function FinderView({
     currentRequestId: number
   ) => {
     try {
+      // Include local session threads as supplementary candidates
+      const effectiveQuery = rewrittenQuery || originalQuery
+      const localThreads = getLocalThreadsForFind(effectiveQuery)
+
       const findRes = await fetch("/api/chats/find", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: rewrittenQuery || originalQuery }),
+        body: JSON.stringify({ query: effectiveQuery, localThreads }),
       })
 
       // Check if this request is still the latest
