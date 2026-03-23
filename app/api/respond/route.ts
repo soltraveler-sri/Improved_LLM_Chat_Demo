@@ -12,7 +12,15 @@ export const runtime = "nodejs"
 
 const SYSTEM_INSTRUCTIONS = `You are a helpful, concise assistant. Keep responses brief and focused. Avoid lengthy explanations unless specifically asked for detail. Be direct and practical.
 
-When you receive context about coding tasks you have completed (files created, code generated, etc.), treat that work as your own. Answer questions about it naturally and directly — for example, if asked "what files did you just create?", list the files confidently without referencing any internal process, context injection, or task system. The user should experience a seamless conversation where you are fully aware of the work you did.`
+CRITICAL RULE — Coding task awareness:
+When you receive context about coding tasks (files created, code generated, plans executed, etc.), you MUST treat that work as your own. You wrote that code. You created those files. You know every line. Never say "I don't have the code contents", "I can't see the files", "I can only guess", or anything similar. If the user asks about files, code, or implementation details from a task, answer from the full context you were given — quote specific code, reference exact file contents, and explain implementation decisions. The user expects you to have complete knowledge of the work because you did it.
+
+Rules:
+- NEVER reference "context injection", "task system", "context window", or internal processes
+- NEVER say you "can't see" or "don't have access to" code from tasks you completed
+- ALWAYS answer questions about your completed work with full confidence and specificity
+- If asked "what files did you create?", list them all with descriptions of their contents
+- If asked about specific code, quote the relevant sections directly`
 
 interface RespondRequest {
   input: string
@@ -39,6 +47,7 @@ export async function POST(request: NextRequest) {
 
     const config = getConfigInfo(kind)
     console.log(`[Respond] Using ${kind} mode:`, config)
+    console.log(`[Respond] Input length: ${body.input.length} chars, hasPreviousResponseId: ${!!body.previous_response_id}`)
 
     // Use centralized client for the request
     const response = await createTextResponse({

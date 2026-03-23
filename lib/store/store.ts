@@ -478,8 +478,11 @@ class ResilientRedisStore implements ChatStore {
       return result
     } catch (error) {
       this.markRedisFailure()
-      console.error(`[ChatStore:Resilient] ${operation} Redis failed, using fallback:`,
-        error instanceof Error ? error.message : error)
+      const errMsg = error instanceof Error ? error.message : String(error)
+      const cause = error instanceof Error && error.cause
+        ? ` (cause: ${error.cause instanceof Error ? error.cause.message : String(error.cause)})`
+        : ""
+      console.error(`[ChatStore:Resilient] ${operation} Redis failed, using fallback: ${errMsg}${cause}`)
       return fallbackFn()
     }
   }
