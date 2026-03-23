@@ -126,21 +126,21 @@ export function getChainedChatModel(): string {
 }
 
 /**
- * Reasoning effort type - GPT-5 supports "minimal", "low", "medium", "high"
- * Note: "none" is NOT supported by GPT-5 series
+ * Reasoning effort type
+ * Supported values vary by model — check your model's documentation.
+ * Common values: "none", "low", "medium", "high", "xhigh"
+ * Some models also support "minimal".
  */
-type ReasoningEffort = "minimal" | "low" | "medium" | "high"
+type ReasoningEffort = string
 
 /**
- * Reasoning effort for each request kind
- *
- * IMPORTANT: GPT-5 series models do NOT support "none"
- * For summarization, we use "minimal" for fastest performance
+ * Default reasoning effort for each request kind.
+ * All defaults can be overridden via environment variables (see REASONING_ENV_VARS).
  */
-const REASONING_EFFORT: Record<RequestKind, ReasoningEffort> = {
+const DEFAULT_REASONING_EFFORT: Record<RequestKind, string> = {
   chat_fast: "low",
   chat_deep: "low",
-  summarize: "minimal", // Use minimal for fastest summarization
+  summarize: "low",
   intent: "low",
   stacks: "low",
   finder: "low",
@@ -148,16 +148,41 @@ const REASONING_EFFORT: Record<RequestKind, ReasoningEffort> = {
 }
 
 /**
- * Fallback reasoning effort if the primary is rejected by the API
+ * Environment variable names for reasoning effort overrides.
+ * Follows the same pattern as MODEL_ENV_VARS.
+ *
+ * Set e.g. OPENAI_REASONING_SUMMARIZE=minimal to use "minimal" for summarization.
  */
-const REASONING_EFFORT_FALLBACK: Partial<Record<RequestKind, ReasoningEffort>> = {
-  summarize: "low", // Fall back to "low" if "minimal" is rejected
+const REASONING_ENV_VARS: Record<RequestKind, string[]> = {
+  chat_fast: ["OPENAI_REASONING_FAST"],
+  chat_deep: ["OPENAI_REASONING_DEEP"],
+  summarize: ["OPENAI_REASONING_SUMMARIZE"],
+  intent: ["OPENAI_REASONING_INTENT"],
+  stacks: ["OPENAI_REASONING_STACKS"],
+  finder: ["OPENAI_REASONING_FINDER"],
+  codex: ["OPENAI_REASONING_CODEX"],
 }
 
 /**
- * Text verbosity for each request kind
+ * Default fallback reasoning effort if the primary is rejected by the API.
+ * Can be overridden via OPENAI_REASONING_FALLBACK_<KIND> env vars.
  */
-const TEXT_VERBOSITY: Record<RequestKind, "low" | "medium" | "high"> = {
+const DEFAULT_REASONING_EFFORT_FALLBACK: Partial<Record<RequestKind, string>> = {
+  summarize: "low", // Fall back to "low" if primary reasoning is rejected
+}
+
+/**
+ * Environment variable names for reasoning effort fallback overrides.
+ */
+const REASONING_FALLBACK_ENV_VARS: Partial<Record<RequestKind, string[]>> = {
+  summarize: ["OPENAI_REASONING_FALLBACK_SUMMARIZE"],
+}
+
+/**
+ * Default text verbosity for each request kind.
+ * Can be overridden via OPENAI_VERBOSITY_<KIND> env vars.
+ */
+const DEFAULT_TEXT_VERBOSITY: Record<RequestKind, string> = {
   chat_fast: "low",
   chat_deep: "low",
   summarize: "low",
@@ -165,6 +190,19 @@ const TEXT_VERBOSITY: Record<RequestKind, "low" | "medium" | "high"> = {
   stacks: "low",
   finder: "low",
   codex: "medium", // Codex needs more verbose output for explanations
+}
+
+/**
+ * Environment variable names for text verbosity overrides.
+ */
+const VERBOSITY_ENV_VARS: Record<RequestKind, string[]> = {
+  chat_fast: ["OPENAI_VERBOSITY_FAST"],
+  chat_deep: ["OPENAI_VERBOSITY_DEEP"],
+  summarize: ["OPENAI_VERBOSITY_SUMMARIZE"],
+  intent: ["OPENAI_VERBOSITY_INTENT"],
+  stacks: ["OPENAI_VERBOSITY_STACKS"],
+  finder: ["OPENAI_VERBOSITY_FINDER"],
+  codex: ["OPENAI_VERBOSITY_CODEX"],
 }
 
 // =============================================================================
@@ -218,24 +256,47 @@ export function getModel(kind: RequestKind): string {
 }
 
 /**
- * Get the reasoning effort for a request kind
+ * Get the reasoning effort for a request kind.
+ * Checks env var override first, then falls back to default.
  */
 export function getReasoningEffort(kind: RequestKind): ReasoningEffort {
-  return REASONING_EFFORT[kind]
+  const envVars = REASONING_ENV_VARS[kind]
+  for (const envVar of envVars) {
+    if (process.env[envVar]) {
+      return process.env[envVar]!
+    }
+  }
+  return DEFAULT_REASONING_EFFORT[kind]
 }
 
 /**
- * Get the fallback reasoning effort for a request kind (if any)
+ * Get the fallback reasoning effort for a request kind (if any).
+ * Checks env var override first, then falls back to default.
  */
 export function getReasoningEffortFallback(kind: RequestKind): ReasoningEffort | undefined {
-  return REASONING_EFFORT_FALLBACK[kind]
+  const envVars = REASONING_FALLBACK_ENV_VARS[kind]
+  if (envVars) {
+    for (const envVar of envVars) {
+      if (process.env[envVar]) {
+        return process.env[envVar]!
+      }
+    }
+  }
+  return DEFAULT_REASONING_EFFORT_FALLBACK[kind]
 }
 
 /**
- * Get the text verbosity for a request kind
+ * Get the text verbosity for a request kind.
+ * Checks env var override first, then falls back to default.
  */
 export function getTextVerbosity(kind: RequestKind): "low" | "medium" | "high" {
-  return TEXT_VERBOSITY[kind]
+  const envVars = VERBOSITY_ENV_VARS[kind]
+  for (const envVar of envVars) {
+    if (process.env[envVar]) {
+      return process.env[envVar] as "low" | "medium" | "high"
+    }
+  }
+  return DEFAULT_TEXT_VERBOSITY[kind] as "low" | "medium" | "high"
 }
 
 /**
@@ -243,8 +304,8 @@ export function getTextVerbosity(kind: RequestKind): "low" | "medium" | "high" {
  */
 export function getConfigInfo(kind: RequestKind): {
   model: string
-  reasoning: ReasoningEffort
-  reasoningFallback: ReasoningEffort | undefined
+  reasoning: string
+  reasoningFallback: string | undefined
   verbosity: string
 } {
   return {
@@ -269,7 +330,7 @@ type NonStreamingResponseParams = OpenAI.Responses.ResponseCreateParamsNonStream
  *
  * This function ensures:
  * - Correct model is selected
- * - Reasoning effort is set appropriately (GPT-5 supports "minimal", "low", "medium", "high")
+ * - Reasoning effort is set appropriately (configurable via env vars)
  * - Text verbosity is set appropriately
  * - No unsupported parameters are sent
  * - Chained kinds (chat_fast, chat_deep) use store: true for previous_response_id
@@ -280,7 +341,7 @@ function buildCommonParams(
   options?: {
     previousResponseId?: string | null
     instructions?: string
-    reasoningEffortOverride?: ReasoningEffort
+    reasoningEffortOverride?: string
     storeOverride?: boolean
   }
 ): NonStreamingResponseParams {
@@ -300,10 +361,10 @@ function buildCommonParams(
     input,
     store: shouldStore,
     stream: false,
-    reasoning: { effort: reasoning },
+    reasoning: { effort: reasoning as "low" | "medium" | "high" },
     text: {
       format: { type: "text" },
-      verbosity,
+      verbosity: verbosity as "low" | "medium" | "high",
     },
   }
 
@@ -366,7 +427,7 @@ export async function createTextResponse(options: {
  * Create a summarization response with timeout and reasoning effort fallback
  * 
  * This function is optimized for speed:
- * - Uses "minimal" reasoning effort (falls back to "low" if rejected)
+ * - Uses configured reasoning effort (falls back per OPENAI_REASONING_FALLBACK_SUMMARIZE if rejected)
  * - Supports abort signal for timeout
  * - Always uses store: false (summarization shouldn't affect chaining state)
  * - Includes instrumentation logging for debugging
@@ -411,7 +472,7 @@ export async function createSummarizeResponse(options: {
   }
 
   try {
-    // Try with primary reasoning effort (minimal)
+    // Try with primary reasoning effort
     const response = await attemptRequest(reasoningUsed)
     const durationMs = Date.now() - startTime
 
@@ -443,15 +504,16 @@ export async function createSummarizeResponse(options: {
       throw error
     }
 
-    // Check if the API rejected "minimal" reasoning effort - retry with fallback
+    // Check if the API rejected the reasoning effort - retry with fallback
     if (
       config.reasoningFallback &&
       error instanceof OpenAI.APIError &&
-      (error.message.includes("reasoning") || 
-       error.message.includes("minimal") ||
+      (error.message.includes("reasoning") ||
+       error.message.includes("Unsupported value") ||
        error.code === "invalid_parameter_value")
     ) {
-      console.log(`[Summarize] "minimal" reasoning rejected, retrying with "${config.reasoningFallback}"`)
+      console.log(`[Summarize] "${reasoningUsed}" reasoning rejected, retrying with "${config.reasoningFallback}"`)
+
       reasoningUsed = config.reasoningFallback
 
       try {
@@ -510,7 +572,7 @@ export async function createParsedResponse<T extends z.ZodType>(options: {
       model,
       input: options.input,
       store: false,
-      reasoning: { effort: reasoning },
+      reasoning: { effort: reasoning as "low" | "medium" | "high" },
       text: {
         format: zodTextFormat(options.schema, options.schemaName),
       },
