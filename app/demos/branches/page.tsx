@@ -54,6 +54,12 @@ async function createStoredThread(title?: string): Promise<string | null> {
         messages: [],
       }
       SessionChatCache.saveThread(localThread)
+      SessionChatCache.trackEvent("localOnlyThreads")
+      logAuditClient("5.9", "thread_created_local_only", {
+        threadId: localThread.id,
+        reason: "server_error",
+        httpStatus: res.status,
+      })
       return localThread.id
     }
     const data = await res.json()
@@ -74,6 +80,11 @@ async function createStoredThread(title?: string): Promise<string | null> {
       messages: [],
     }
     SessionChatCache.saveThread(localThread)
+    SessionChatCache.trackEvent("localOnlyThreads")
+    logAuditClient("5.9", "thread_created_local_only", {
+      threadId: localThread.id,
+      reason: "network_error",
+    })
     return localThread.id
   }
 }
@@ -575,6 +586,18 @@ export default function BranchesDemo() {
 
   // Reset chat state
   const handleReset = () => {
+    // Log session cache diagnostics snapshot before clearing
+    const diag = SessionChatCache.getDiagnostics()
+    const snapshot = SessionChatCache.getSnapshot()
+    const hasActivity = Object.values(diag).some((v) => v > 0)
+    if (hasActivity) {
+      logAuditClient("5.9", "session_cache_diagnostics", {
+        ...diag,
+        ...snapshot,
+        trigger: "new_chat",
+      })
+    }
+
     setState({
       messages: [],
       lastResponseId: null,

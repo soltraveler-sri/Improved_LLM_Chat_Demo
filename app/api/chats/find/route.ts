@@ -303,6 +303,20 @@ export async function POST(request: NextRequest) {
 
     const allChats = Array.from(chatMap.values())
 
+    // Log merge diagnostics — identifies when local threads supplement the server
+    const localOnlyIds = localThreads
+      ? localThreads.filter((lt) => !storeChats.some((sc) => sc.id === lt.id)).map((lt) => lt.id.slice(0, 8))
+      : []
+    if (localOnlyIds.length > 0 || (localThreads && localThreads.length > 0)) {
+      logAuditServer("5.9", "find_thread_merge", {
+        storeThreadCount: storeChats.length,
+        localThreadCount: localThreads?.length || 0,
+        mergedTotal: allChats.length,
+        localOnlyCount: localOnlyIds.length,
+        localOnlyIds,
+      })
+    }
+
     if (allChats.length === 0) {
       const response: FindResponse = { query, options: [] }
       return NextResponse.json(response)

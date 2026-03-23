@@ -19,6 +19,7 @@ import { TaskCard } from "@/components/codex"
 import { StorageWarningBanner } from "@/components/ui/storage-warning-banner"
 import type { CodexTask, WorkspaceSnapshot } from "@/lib/codex/types"
 import { SessionChatCache } from "@/lib/session-cache"
+import { logAuditClient } from "@/lib/telemetry"
 
 /**
  * Message types for the Demo 3 chat
@@ -250,6 +251,13 @@ export default function CodexDemoPage() {
       const cached = SessionChatCache.getTask(taskId)
       if (cached) {
         setTasks((prev) => ({ ...prev, [taskId]: cached }))
+        SessionChatCache.trackEvent("codexTaskCacheFallbacks")
+        logAuditClient("5.9", "codex_task_cache_fallback", {
+          taskId: taskId.slice(0, 8),
+          reason: "server_error",
+          httpStatus: res.status,
+          cachedStatus: cached.status,
+        })
         return cached
       }
       return null
@@ -259,6 +267,12 @@ export default function CodexDemoPage() {
       const cached = SessionChatCache.getTask(taskId)
       if (cached) {
         setTasks((prev) => ({ ...prev, [taskId]: cached }))
+        SessionChatCache.trackEvent("codexTaskCacheFallbacks")
+        logAuditClient("5.9", "codex_task_cache_fallback", {
+          taskId: taskId.slice(0, 8),
+          reason: "network_error",
+          cachedStatus: cached.status,
+        })
         return cached
       }
       return null

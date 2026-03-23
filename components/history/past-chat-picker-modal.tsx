@@ -27,6 +27,7 @@ import { cn } from "@/lib/utils"
 import type { StoredChatCategory, StoredChatThreadMeta } from "@/lib/store/types"
 import { CATEGORY_LABELS } from "@/lib/store/types"
 import { SessionChatCache } from "@/lib/session-cache"
+import { logAuditClient } from "@/lib/telemetry"
 
 // Icon mapping for categories
 const CATEGORY_ICON_MAP: Record<StoredChatCategory, React.ReactNode> = {
@@ -106,6 +107,20 @@ export function PastChatPickerModal({
         const merged = Array.from(mergedMap.values())
         merged.sort((a, b) => b.updatedAt - a.updatedAt)
         setThreads(merged)
+
+        // Track merge divergence
+        const localOnlyCount = localThreads.filter(
+          (lt) => !serverThreads.some((st) => st.id === lt.id)
+        ).length
+        if (localOnlyCount > 0) {
+          SessionChatCache.trackEvent("mergeLocalOnlyCount", localOnlyCount)
+          logAuditClient("5.9", "picker_thread_merge", {
+            serverCount: serverThreads.length,
+            localCount: localThreads.length,
+            mergedCount: merged.length,
+            localOnlyCount,
+          })
+        }
       } finally {
         setIsLoading(false)
       }
