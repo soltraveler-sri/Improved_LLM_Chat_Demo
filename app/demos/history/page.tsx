@@ -47,6 +47,7 @@ import type {
   StacksMeta,
 } from "@/lib/store/types"
 import { STORED_CHAT_CATEGORIES, CATEGORY_LABELS } from "@/lib/store/types"
+import { SessionChatCache } from "@/lib/session-cache"
 
 // Icon mapping for categories
 const CATEGORY_ICON_MAP: Record<StoredChatCategory, React.ReactNode> = {
@@ -187,7 +188,7 @@ function HistoryDemoContent() {
     router.push(`/demos/history?${params.toString()}`)
   }, [router, searchParams])
 
-  // Fetch threads and stacks meta
+  // Fetch threads and stacks meta, merging with session cache
   const fetchData = useCallback(async () => {
     try {
       const [threadsRes, metaRes] = await Promise.all([
@@ -195,10 +196,20 @@ function HistoryDemoContent() {
         fetch("/api/stacks/meta"),
       ])
 
+      let serverThreads: StoredChatThreadMeta[] = []
       if (threadsRes.ok) {
         const data = await threadsRes.json()
-        setThreads(data.threads || [])
+        serverThreads = data.threads || []
       }
+
+      // Merge with session cache (union by ID, server wins)
+      const localThreads = SessionChatCache.listThreads()
+      const mergedMap = new Map<string, StoredChatThreadMeta>()
+      for (const t of localThreads) mergedMap.set(t.id, t)
+      for (const t of serverThreads) mergedMap.set(t.id, t)
+      const merged = Array.from(mergedMap.values())
+      merged.sort((a, b) => b.updatedAt - a.updatedAt)
+      setThreads(merged)
 
       if (metaRes.ok) {
         const data = await metaRes.json()
@@ -233,9 +244,16 @@ function HistoryDemoContent() {
         if (res.ok) {
           const data = await res.json()
           setSelectedThread(data.thread || null)
+        } else {
+          // Server returned error — fall back to session cache
+          const cached = SessionChatCache.getThread(currentChatId)
+          if (cached) setSelectedThread(cached)
         }
       } catch (error) {
         console.error("Failed to fetch thread:", error)
+        // Network error — fall back to session cache
+        const cached = SessionChatCache.getThread(currentChatId)
+        if (cached) setSelectedThread(cached)
       } finally {
         setIsLoadingThread(false)
       }

@@ -18,6 +18,7 @@ import { cn } from "@/lib/utils"
 import { TaskCard } from "@/components/codex"
 import { StorageWarningBanner } from "@/components/ui/storage-warning-banner"
 import type { CodexTask, WorkspaceSnapshot } from "@/lib/codex/types"
+import { SessionChatCache } from "@/lib/session-cache"
 
 /**
  * Message types for the Demo 3 chat
@@ -241,11 +242,25 @@ export default function CodexDemoPage() {
         const data = await res.json()
         const refreshedTask = data.task as CodexTask
         setTasks((prev) => ({ ...prev, [taskId]: refreshedTask }))
+        // Write-through: cache task in session storage
+        SessionChatCache.saveTask(refreshedTask)
         return refreshedTask
+      }
+      // Server returned non-OK — fall back to session cache
+      const cached = SessionChatCache.getTask(taskId)
+      if (cached) {
+        setTasks((prev) => ({ ...prev, [taskId]: cached }))
+        return cached
       }
       return null
     } catch (error) {
       console.error("Failed to refresh task:", error)
+      // Fall back to session cache on network error
+      const cached = SessionChatCache.getTask(taskId)
+      if (cached) {
+        setTasks((prev) => ({ ...prev, [taskId]: cached }))
+        return cached
+      }
       return null
     }
   }
@@ -348,6 +363,8 @@ export default function CodexDemoPage() {
         }
 
         const task = data.task as CodexTask
+        // Write-through: cache newly created task
+        SessionChatCache.saveTask(task)
 
         if (process.env.NODE_ENV === "development") {
           console.log(

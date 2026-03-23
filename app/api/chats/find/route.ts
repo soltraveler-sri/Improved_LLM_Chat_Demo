@@ -12,10 +12,27 @@ import { logAuditServer } from "@/lib/telemetry"
 // Uses local lexical scoring for candidate generation + LLM rerank.
 // ---------------------------------------------------------------------------
 
+// Schema for client-provided local threads (session cache fallback)
+const LocalThreadMessageSchema = z.object({
+  role: z.string(),
+  text: z.string(),
+})
+
+const LocalThreadSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  summary: z.string().optional().default(""),
+  category: z.string().optional().default("recent"),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  messages: z.array(LocalThreadMessageSchema).optional().default([]),
+})
+
 // Request schema
 const FindRequestSchema = z.object({
   query: z.string().min(1),
   maxCandidates: z.number().min(1).max(60).optional(),
+  localThreads: z.array(LocalThreadSchema).optional(),
 })
 
 // Structured output schema for LLM rerank
@@ -234,7 +251,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const { query } = parseResult.data
+    const { query, localThreads } = parseResult.data
 
     // Determine maxCandidates and topK from env or request
     const envMaxCandidates = process.env.OPENAI_CHAT_FINDER_MAX_CANDIDATES
@@ -250,7 +267,41 @@ export async function POST(request: NextRequest) {
 
     // Step A: Load all chats, fetch message snippets, and generate candidates
     const store = getChatStore()
-    const allChats = await store.listThreads(demoUid)
+    const storeChats = await store.listThreads(demoUid)
+
+    // Merge store threads with client-provided local threads (union by ID, store wins)
+    const chatMap = new Map<string, StoredChatThreadMeta>()
+    const localMessageTexts = new Map<string, string>()
+
+    // First add local threads (these may contain threads the server doesn't know about)
+    if (localThreads && localThreads.length > 0) {
+      for (const lt of localThreads) {
+        chatMap.set(lt.id, {
+          id: lt.id,
+          title: lt.title,
+          summary: lt.summary,
+          category: lt.category as StoredChatThreadMeta["category"],
+          createdAt: lt.createdAt,
+          updatedAt: lt.updatedAt,
+        })
+        // Build message snippets from local thread messages
+        if (lt.messages.length > 0) {
+          const snippet = lt.messages
+            .slice(-10)
+            .map((m) => `${m.role}: ${m.text}`)
+            .join(" | ")
+            .slice(0, 500)
+          localMessageTexts.set(lt.id, snippet)
+        }
+      }
+    }
+
+    // Store threads override local (server is source of truth when available)
+    for (const chat of storeChats) {
+      chatMap.set(chat.id, chat)
+    }
+
+    const allChats = Array.from(chatMap.values())
 
     if (allChats.length === 0) {
       const response: FindResponse = { query, options: [] }
@@ -259,9 +310,9 @@ export async function POST(request: NextRequest) {
 
     // Load message text snippets for transcript-aware search
     // Fetch full threads to extract recent message text for scoring and rerank
-    const messageTexts = new Map<string, string>()
+    const messageTexts = new Map<string, string>(localMessageTexts)
     await Promise.all(
-      allChats.map(async (chat) => {
+      storeChats.map(async (chat) => {
         try {
           const thread = await store.getThread(demoUid, chat.id)
           if (thread && thread.messages.length > 0) {
@@ -274,7 +325,7 @@ export async function POST(request: NextRequest) {
             messageTexts.set(chat.id, snippet)
           }
         } catch {
-          // Skip if thread load fails
+          // Skip if thread load fails — local snippets already in map as fallback
         }
       })
     )

@@ -26,6 +26,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 import type { StoredChatCategory, StoredChatThreadMeta } from "@/lib/store/types"
 import { CATEGORY_LABELS } from "@/lib/store/types"
+import { SessionChatCache } from "@/lib/session-cache"
 
 // Icon mapping for categories
 const CATEGORY_ICON_MAP: Record<StoredChatCategory, React.ReactNode> = {
@@ -79,20 +80,32 @@ export function PastChatPickerModal({
   const [threads, setThreads] = useState<StoredChatThreadMeta[]>([])
   const [isLoading, setIsLoading] = useState(false)
 
-  // Fetch all threads when modal opens
+  // Fetch all threads when modal opens, merging with session cache
   useEffect(() => {
     if (!isOpen) return
 
     async function fetchThreads() {
       setIsLoading(true)
       try {
-        const res = await fetch("/api/chats")
-        if (res.ok) {
-          const data = await res.json()
-          setThreads(data.threads || [])
+        let serverThreads: StoredChatThreadMeta[] = []
+        try {
+          const res = await fetch("/api/chats")
+          if (res.ok) {
+            const data = await res.json()
+            serverThreads = data.threads || []
+          }
+        } catch (error) {
+          console.error("Failed to fetch threads from server:", error)
         }
-      } catch (error) {
-        console.error("Failed to fetch threads:", error)
+
+        // Merge with session cache (union by ID, prefer server version)
+        const localThreads = SessionChatCache.listThreads()
+        const mergedMap = new Map<string, StoredChatThreadMeta>()
+        for (const t of localThreads) mergedMap.set(t.id, t)
+        for (const t of serverThreads) mergedMap.set(t.id, t) // server wins
+        const merged = Array.from(mergedMap.values())
+        merged.sort((a, b) => b.updatedAt - a.updatedAt)
+        setThreads(merged)
       } finally {
         setIsLoading(false)
       }

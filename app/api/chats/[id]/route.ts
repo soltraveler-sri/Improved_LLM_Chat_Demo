@@ -71,13 +71,23 @@ export async function PATCH(
 
     const store = getChatStore()
 
-    // Check if thread exists
-    const existing = await store.getThread(demoUid, id)
+    // Check if thread exists — if not, auto-create (upsert) to handle
+    // threads that only exist in the client's session cache
+    let existing = await store.getThread(demoUid, id)
     if (!existing) {
-      return NextResponse.json(
-        { error: "Thread not found" },
-        { status: 404 }
-      )
+      try {
+        existing = await store.createThread(demoUid, {
+          id,
+          title: "New Chat",
+          category: "recent",
+          messages: [],
+        })
+      } catch {
+        return NextResponse.json(
+          { error: "Thread not found" },
+          { status: 404 }
+        )
+      }
     }
 
     // Only allow updating specific fields
