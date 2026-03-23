@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { createTextResponse, extractTextOutput, getConfigInfo } from "@/lib/openai"
+import { createSummarizeResponse, extractTextOutput, getConfigInfo } from "@/lib/openai"
 
 export const runtime = "nodejs"
 
@@ -25,16 +25,16 @@ export async function POST(request: NextRequest) {
     const prompt = `${TITLE_PROMPT}\n\n${transcript}`
 
     // Use the lightweight summarize model (gpt-5-nano) — fast and cheap
+    // Uses createSummarizeResponse which has reasoning effort fallback
+    // ("minimal" -> "low") for models that don't support "minimal"
     const config = getConfigInfo("summarize")
     if (process.env.NODE_ENV === "development") {
       console.log(`[GenerateTitle] Using model: ${config.model}`)
     }
 
-    const response = await createTextResponse({
-      kind: "summarize",
+    const { response } = await createSummarizeResponse({
       input: [{ role: "user", content: prompt }],
       instructions: "You are a chat title generator. Output only the title, nothing else.",
-      storeOverride: false,
     })
 
     const title = extractTextOutput(response).trim().replace(/^["']|["']$/g, "")
