@@ -47,6 +47,7 @@ export async function POST(request: NextRequest) {
 
     const config = getConfigInfo(kind)
     console.log(`[Respond] Using ${kind} mode:`, config)
+    console.log(`[Respond] Input length: ${body.input.length} chars, hasPreviousResponseId: ${!!body.previous_response_id}`)
 
     // Use centralized client for the request
     const response = await createTextResponse({
