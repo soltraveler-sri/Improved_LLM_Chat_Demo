@@ -106,10 +106,13 @@ export function AudioPlayer({
       typeof MediaSource !== "undefined" &&
       MediaSource.isTypeSupported("audio/mpeg")
 
+    const t0 = performance.now()
+    console.log(`[TTS:telemetry] Stream init | path=${canUseMediaSource ? "MediaSource" : "fallback"} | textLen=${streamConfig.text.length}`)
+
     if (canUseMediaSource) {
-      startMediaSourceStream(streamConfig, abortController.signal)
+      startMediaSourceStream(streamConfig, abortController.signal, t0)
     } else {
-      startFallbackStream(streamConfig, abortController.signal)
+      startFallbackStream(streamConfig, abortController.signal, t0)
     }
 
     return () => {
@@ -124,7 +127,8 @@ export function AudioPlayer({
 
   async function startMediaSourceStream(
     config: TTSStreamConfig,
-    signal: AbortSignal
+    signal: AbortSignal,
+    t0: number
   ) {
     try {
       const ms = new MediaSource()
@@ -143,6 +147,8 @@ export function AudioPlayer({
 
       const sb = ms.addSourceBuffer("audio/mpeg")
 
+      console.log(`[TTS:telemetry] MediaSource ready, sending fetch | +${Math.round(performance.now() - t0)}ms`)
+
       const res = await fetch("/api/doc/tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -155,6 +161,8 @@ export function AudioPlayer({
         signal,
       })
 
+      console.log(`[TTS:telemetry] Fetch response received (status ${res.status}) | +${Math.round(performance.now() - t0)}ms`)
+
       if (!res.ok || !res.body) {
         const errData = await res.json().catch(() => ({}))
         throw new Error(
@@ -164,11 +172,17 @@ export function AudioPlayer({
 
       const reader = res.body.getReader()
       let firstChunkReceived = false
+      let chunkCount = 0
+      let totalBytes = 0
 
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
         if (signal.aborted) return
+
+        chunkCount++
+        totalBytes += value.byteLength
+        console.log(`[TTS:telemetry] Chunk #${chunkCount} received | ${value.byteLength} bytes | total=${totalBytes} | +${Math.round(performance.now() - t0)}ms`)
 
         // Wait for sourceBuffer to finish any pending update
         if (sb.updating) {
@@ -183,12 +197,19 @@ export function AudioPlayer({
         if (!firstChunkReceived) {
           firstChunkReceived = true
           setIsBuffering(false)
+          console.log(`[TTS:telemetry] First chunk appended, attempting auto-play | +${Math.round(performance.now() - t0)}ms`)
           // Auto-play after first chunk arrives
           const a = audioRef.current
           if (a) {
             a.play()
-              .then(() => setIsPlaying(true))
-              .catch(() => setIsPlaying(false))
+              .then(() => {
+                setIsPlaying(true)
+                console.log(`[TTS:telemetry] Audio playback STARTED | +${Math.round(performance.now() - t0)}ms`)
+              })
+              .catch((playErr) => {
+                setIsPlaying(false)
+                console.warn(`[TTS:telemetry] Auto-play BLOCKED: ${playErr.message} | +${Math.round(performance.now() - t0)}ms`)
+              })
           }
         }
       }
@@ -204,9 +225,10 @@ export function AudioPlayer({
         ms.endOfStream()
       }
       setStreamComplete(true)
+      console.log(`[TTS:telemetry] Stream COMPLETE | ${chunkCount} chunks | ${totalBytes} bytes | +${Math.round(performance.now() - t0)}ms`)
     } catch (err) {
       if (signal.aborted) return
-      console.error("[AudioPlayer] MediaSource stream error:", err)
+      console.error(`[TTS:telemetry] MediaSource stream ERROR: ${err instanceof Error ? err.message : err} | +${Math.round(performance.now() - t0)}ms`)
       setStreamError(err instanceof Error ? err.message : "Streaming failed")
       setIsBuffering(false)
     }
@@ -214,9 +236,12 @@ export function AudioPlayer({
 
   async function startFallbackStream(
     config: TTSStreamConfig,
-    signal: AbortSignal
+    signal: AbortSignal,
+    t0: number
   ) {
     try {
+      console.log(`[TTS:telemetry] Fallback: sending fetch | +${Math.round(performance.now() - t0)}ms`)
+
       const res = await fetch("/api/doc/tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -237,6 +262,7 @@ export function AudioPlayer({
       }
 
       const blob = await res.blob()
+      console.log(`[TTS:telemetry] Fallback: full blob received (${blob.size} bytes) | +${Math.round(performance.now() - t0)}ms`)
       if (signal.aborted) return
 
       const blobUrl = URL.createObjectURL(blob)
@@ -244,14 +270,20 @@ export function AudioPlayer({
       if (audio) {
         audio.src = blobUrl
         audio.play()
-          .then(() => setIsPlaying(true))
-          .catch(() => setIsPlaying(false))
+          .then(() => {
+            setIsPlaying(true)
+            console.log(`[TTS:telemetry] Fallback: playback STARTED | +${Math.round(performance.now() - t0)}ms`)
+          })
+          .catch((playErr) => {
+            setIsPlaying(false)
+            console.warn(`[TTS:telemetry] Fallback: auto-play BLOCKED: ${playErr.message}`)
+          })
       }
       setIsBuffering(false)
       setStreamComplete(true)
     } catch (err) {
       if (signal.aborted) return
-      console.error("[AudioPlayer] Fallback stream error:", err)
+      console.error(`[TTS:telemetry] Fallback ERROR: ${err instanceof Error ? err.message : err} | +${Math.round(performance.now() - t0)}ms`)
       setStreamError(err instanceof Error ? err.message : "TTS failed")
       setIsBuffering(false)
     }
