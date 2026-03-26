@@ -56,15 +56,19 @@ export async function POST(request: NextRequest) {
     }
 
     // Stream MP3 bytes as each chunk is generated
+    const t0 = Date.now()
     const stream = new ReadableStream({
       async start(controller) {
         try {
           for (let i = 0; i < textChunks.length; i++) {
-            console.log(`[Doc:tts] Generating chunk ${i + 1}/${textChunks.length}`)
+            const chunkStart = Date.now()
+            console.log(`[Doc:tts] Generating chunk ${i + 1}/${textChunks.length} (${textChunks[i].length} chars) | +${chunkStart - t0}ms`)
             const audioBuffer = await generateChunkAudio(textChunks[i], options)
+            const chunkEnd = Date.now()
+            console.log(`[Doc:tts] Chunk ${i + 1}/${textChunks.length} done: ${audioBuffer.byteLength} bytes in ${chunkEnd - chunkStart}ms | enqueuing at +${chunkEnd - t0}ms`)
             controller.enqueue(new Uint8Array(audioBuffer))
           }
-          console.log(`[Doc:tts] Streaming complete (${textChunks.length} chunks)`)
+          console.log(`[Doc:tts] Streaming complete (${textChunks.length} chunks) | total ${Date.now() - t0}ms`)
           controller.close()
         } catch (error) {
           console.error("[Doc:tts] Stream error:", error)
